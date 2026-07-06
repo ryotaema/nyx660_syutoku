@@ -1,0 +1,28 @@
+sdk_path: ../../ScepterSDK  # config.yaml からの相対パス。別環境では変更してください
+
+camera:
+  fps: 30
+  depth_alpha: 0.4   # depth colormap 倍率（調整して使用）
+  color_width: 1600  # color解像度（選択肢例: 1600x1200 / 800x600 / 640x480）
+  color_height: 1200
+
+output:
+  images_dir: ../data/images        # config.yaml からの相対パス
+  pointcloud_dir: ../data/pointcloud
+  timelapse_dir: ../data/timelapse_data
+  mp4_dir: ../data/mp4
+
+model:
+  yolo_path: model/best.pt          # config.yaml からの相対パス
+  confidence_threshold: 0.5
+
+pointcloud:
+  capture_frames: 50  # auto モードのデフォルトフレーム数
+  voxel_size: 0.005   # ICP前処理・出力のダウンサンプリング解像度 (m)
+  icp_threshold: 0.02 # ICP 最大対応点距離 (m)
+
+filters:
+  time_filter: 3    # [1,3]  大きいほどジッタ減
+  confidence: 15    # [1,100]
+  flying_pixel: 5   # [1,16]
+  spatial: false

@@ -1,0 +1,20 @@
+# ドキュメント（個人メモ・比較資料）
+CLAUDE.md
+RealSense_vs_NYX660.md
+
+# YOLO モデル
+nyx660_script/model/
+
+# データ（ディレクトリ構造は .gitkeep で保持）
+data/**
+!data/**/
+!data/**/.gitkeep
+
+# Python キャッシュ
+__pycache__/
+*.pyc
+*.pyo
+
+# OS
+.DS_Store
+Thumbs.db

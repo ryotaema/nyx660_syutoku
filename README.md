@@ -275,3 +275,23 @@ mp4_dir/
 
 - SDK リポジトリ: https://github.com/ScepterSW/ScepterSDK
 - API リファレンス: https://wiki.vzense.com
+
+## ライセンス
+
+このリポジトリは [GNU Affero General Public License v3.0 (AGPL-3.0)](LICENSE) のもとで公開されています。
+
+本プロジェクトは [Ultralytics YOLO](https://github.com/ultralytics/ultralytics)（AGPL-3.0）を使用しているため、AGPL-3.0 に従い同ライセンスを適用しています。
+
+### サードパーティライセンス
+
+本プロジェクトは以下のライブラリを使用しています。
+
+| ライブラリ | ライセンス |
+|---|---|
+| [ScepterSDK](https://github.com/ScepterSW/ScepterSDK) | BSD 3-Clause（Copyright © 2024 Scepter Software） |
+| [Ultralytics YOLO](https://github.com/ultralytics/ultralytics) | AGPL-3.0 |
+| [Open3D](https://github.com/isl-org/Open3D) | MIT |
+| [OpenCV](https://github.com/opencv/opencv) | Apache 2.0 |
+| [NumPy](https://github.com/numpy/numpy) | BSD 3-Clause |
+| [PyYAML](https://github.com/yaml/pyyaml) | MIT |
+| [Matplotlib](https://github.com/matplotlib/matplotlib) | PSF-based（BSD 互換） |
