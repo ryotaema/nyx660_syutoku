@@ -1,9 +1,11 @@
 sdk_path: ../../ScepterSDK  # config.yaml からの相対パス。別環境では変更してください
 
 camera:
-  # ScepterGUITool で調整してエクスポートしたパラメータJSON。
-  # 解像度・FPS・ワークモード・露光時間・フィルタ・Fillhole・IRGm補正を
-  # scSetParamsByJson() で一括適用する（config.yaml からの相対パス）。
+  # ScepterGUITool で調整してエクスポートしたパラメータJSON（config.yaml からの相対パス）。
+  # 解像度・FPS・ワークモード・露光時間・フィルタ・Fillhole・IRGm補正は、
+  # utils.py の open_camera() がJSONの値を個別API（scSetExposureTime等）で
+  # 1つずつ適用する（scSetParamsByJsonは実機で反映されないため不使用。詳細は
+  # ../../log_nyx/2026-07-10.md）。
   # fps / color_width / color_height はこのJSONの Control.FrameRate /
   # ColorResolution から自動で読み取られるため、ここには書かない。
   # 明示的に上書きしたい場合のみ fps: / color_width: / color_height: を追加する
@@ -27,4 +29,5 @@ pointcloud:
   icp_threshold: 0.02 # ICP 最大対応点距離 (m)
 
 # フィルタ・露光時間・Fillhole等は camera.params_json（ScepterGUIToolエクスポート）で
-# 一括管理する。個別のfilters設定は廃止（scSetParamsByJsonが上書きするため無効）。
+# 一括管理する。個別のfilters設定は廃止（utils.pyのopen_camera()がJSONの値を
+# 個別APIで適用するため、ここに書いても反映されない）。
