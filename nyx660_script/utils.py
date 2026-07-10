@@ -16,7 +16,7 @@ if 'DISPLAY' not in os.environ:
 import numpy as np
 import cv2
 from pathlib import Path
-from ctypes import c_uint8, c_int32
+from ctypes import c_uint8, c_int32, c_uint16, c_bool
 
 _CFG_PATH = Path(__file__).parent / "config.yaml"
 
@@ -98,6 +98,174 @@ def init_sdk(cfg):
         sys.path.insert(0, python_path)
 
 
+def _load_params_json(params_path):
+    try:
+        with open(params_path) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"警告: params_json の読み込みに失敗しました（{params_path}）: {e}")
+        return None
+
+
+def _apply_tof_resolution(cam, control):
+    """ToF解像度をJSONのControlから適用する（StartStream前必須）。"""
+    res = control.get('ToFResolution')
+    if res and '*' in res:
+        w, h = res.split('*')
+        ret = cam.scSetToFResolution(c_int32(int(w)), c_int32(int(h)))
+        if ret != 0:
+            print(f"警告: scSetToFResolution failed: {ret}")
+
+
+def _apply_exposure_and_filter_params(cam, params):
+    """露光・フィルタ・IRGm補正をJSONの値で個別APIを使い明示的に設定する（StartStream後必須）。
+
+    scSetParamsByJson（JSON一括適用）は実機でScepterGUIToolの表示と一致しない事象が
+    確認されたため使用せず、公式サンプル ToFExposureTimeSetGet / ToFFiltersSetGet と
+    同じ個別APIをJSONの値で呼ぶ方式にしている。
+    """
+    from API.ScepterDS_enums import ScSensorType, ScExposureControlMode
+    from API.ScepterDS_types import (
+        ScIRGMMCorrectionParams, ScTimeFilterParams,
+        ScConfidenceFilterParams, ScFlyingPixelFilterParams,
+    )
+
+    def _check(name, ret):
+        if ret != 0:
+            print(f"警告: {name} failed: {ret}")
+
+    exposure = params.get('ExposureTime', {})
+
+    def _set_exposure(label, sensor_type, mode_str, time_us):
+        if not mode_str:
+            return
+        mode = (ScExposureControlMode.SC_EXPOSURE_CONTROL_MODE_MANUAL if mode_str == 'Manual'
+                else ScExposureControlMode.SC_EXPOSURE_CONTROL_MODE_AUTO)
+        _check(f"scSetExposureControlMode({label})", cam.scSetExposureControlMode(sensor_type, mode))
+        if mode == ScExposureControlMode.SC_EXPOSURE_CONTROL_MODE_MANUAL and time_us is not None:
+            _check(f"scSetExposureTime({label})", cam.scSetExposureTime(sensor_type, c_int32(int(time_us))))
+
+    _set_exposure('ToF', ScSensorType.SC_TOF_SENSOR, exposure.get('ToF_ExposureMode'), exposure.get('ToF_ExposureTime'))
+    _set_exposure('Color', ScSensorType.SC_COLOR_SENSOR, exposure.get('Color_ExposureMode'), exposure.get('Color_ExposureTime'))
+
+    roi = exposure.get('ColorAECROI')
+    if roi and len(roi) == 4:
+        x, y, w, h = roi
+        _check("scSetColorAECROI", cam.scSetColorAECROI(c_uint16(x), c_uint16(y), c_uint16(w), c_uint16(h)))
+
+    if 'HDR_Mode' in exposure:
+        _check("scSetHDRModeEnabled", cam.scSetHDRModeEnabled(c_bool(bool(exposure['HDR_Mode']))))
+    if 'WDR_Mode' in exposure:
+        _check("scSetWDRModeEnabled", cam.scSetWDRModeEnabled(c_bool(bool(exposure['WDR_Mode']))))
+
+    control = params.get('Control', {})
+    if 'IRGmmGain' in control:
+        _check("scSetIRGMMGain", cam.scSetIRGMMGain(c_uint8(int(control['IRGmmGain']))))
+    if 'IRGmmCorrectionEnabled' in control or 'IRGmmCorrectionThreshold' in control:
+        gmm = ScIRGMMCorrectionParams()
+        gmm.enable = bool(control.get('IRGmmCorrectionEnabled', False))
+        gmm.threshold = int(control.get('IRGmmCorrectionThreshold', 0))
+        _check("scSetIRGMMCorrection", cam.scSetIRGMMCorrection(gmm))
+
+    filt = params.get('Filter', {})
+    if 'TimeFilter' in filt or 'TimeFilter_Threshold' in filt:
+        p = ScTimeFilterParams()
+        p.enable = bool(filt.get('TimeFilter', False))
+        p.threshold = int(filt.get('TimeFilter_Threshold', 0))
+        _check("scSetTimeFilterParams", cam.scSetTimeFilterParams(p))
+    if 'ConfidenceFilter' in filt or 'ConfidenceFilter_Threshold' in filt:
+        p = ScConfidenceFilterParams()
+        p.enable = bool(filt.get('ConfidenceFilter', False))
+        p.threshold = int(filt.get('ConfidenceFilter_Threshold', 0))
+        _check("scSetConfidenceFilterParams", cam.scSetConfidenceFilterParams(p))
+    if 'FlyingPixelFilter' in filt or 'FlyingPixelFilter_Threshold' in filt:
+        p = ScFlyingPixelFilterParams()
+        p.enable = bool(filt.get('FlyingPixelFilter', False))
+        p.threshold = int(filt.get('FlyingPixelFilter_Threshold', 0))
+        _check("scSetFlyingPixelFilterParams", cam.scSetFlyingPixelFilterParams(p))
+    if 'Fillhole' in filt:
+        _check("scSetFillHoleFilterEnabled", cam.scSetFillHoleFilterEnabled(c_bool(bool(filt['Fillhole']))))
+    if 'SpatialFilter' in filt:
+        _check("scSetSpatialFilterEnabled", cam.scSetSpatialFilterEnabled(c_bool(bool(filt['SpatialFilter']))))
+
+
+def _print_applied_params(cam, params):
+    """JSONの期待値と実機の読み戻し値を並べて表示する（ズレを一目で確認するため）。"""
+    from API.ScepterDS_enums import ScSensorType, ScExposureControlMode, ScWorkMode
+
+    def _mode_name(v):
+        try:
+            return ScExposureControlMode(v).name
+        except ValueError:
+            return str(v)
+
+    def _workmode_name(v):
+        try:
+            return ScWorkMode(v).name
+        except ValueError:
+            return str(v)
+
+    control  = (params or {}).get('Control', {})
+    exposure = (params or {}).get('ExposureTime', {})
+    filt     = (params or {}).get('Filter', {})
+
+    _, tw, th       = cam.scGetToFResolution()
+    _, cw, ch       = cam.scGetColorResolution()
+    _, fps          = cam.scGetFrameRate()
+    _, work_mode    = cam.scGetWorkMode()
+    _, tof_mode     = cam.scGetExposureControlMode(ScSensorType.SC_TOF_SENSOR)
+    _, tof_exp      = cam.scGetExposureTime(ScSensorType.SC_TOF_SENSOR)
+    _, color_mode   = cam.scGetExposureControlMode(ScSensorType.SC_COLOR_SENSOR)
+    _, color_exp    = cam.scGetExposureTime(ScSensorType.SC_COLOR_SENSOR)
+    _, rx, ry, rw, rh = cam.scGetColorAECROI()
+    _, hdr          = cam.scGetHDRModeEnabled()
+    _, wdr          = cam.scGetWDRModeEnabled()
+    _, gmm_gain     = cam.scGetIRGMMGain()
+    _, gmm_corr     = cam.scGetIRGMMCorrection()
+    _, time_f       = cam.scGetTimeFilterParams()
+    _, conf_f       = cam.scGetConfidenceFilterParams()
+    _, fly_f        = cam.scGetFlyingPixelFilterParams()
+    _, fillhole     = cam.scGetFillHoleFilterEnabled()
+    _, spatial      = cam.scGetSpatialFilterEnabled()
+    _, xform_d2c    = cam.scGetTransformDepthImgToColorSensorEnabled()
+    _, xform_c2d    = cam.scGetTransformColorImgToDepthSensorEnabled()
+
+    rows = [
+        ("ToF解像度",              control.get('ToFResolution'),          f"{tw}*{th}"),
+        ("Color解像度",            control.get('ColorResolution'),        f"{cw}*{ch}"),
+        ("FPS",                    control.get('FrameRate'),              fps),
+        ("WorkMode",               control.get('WorkMode'),               _workmode_name(work_mode)),
+        ("ToF露光mode",            exposure.get('ToF_ExposureMode'),      _mode_name(tof_mode)),
+        ("ToF露光time(us)",        exposure.get('ToF_ExposureTime'),      tof_exp),
+        ("Color露光mode",          exposure.get('Color_ExposureMode'),    _mode_name(color_mode)),
+        ("Color露光time(us)",      exposure.get('Color_ExposureTime'),    color_exp),
+        ("ColorAECROI",            exposure.get('ColorAECROI'),           [rx, ry, rw, rh]),
+        ("HDR_Mode",               exposure.get('HDR_Mode'),              hdr),
+        ("WDR_Mode",               exposure.get('WDR_Mode'),              wdr),
+        ("IRGmmGain",              control.get('IRGmmGain'),              gmm_gain),
+        ("IRGmmCorrection enable", control.get('IRGmmCorrectionEnabled'), gmm_corr.enable),
+        ("IRGmmCorrection thresh", control.get('IRGmmCorrectionThreshold'), gmm_corr.threshold),
+        ("TimeFilter enable",      filt.get('TimeFilter'),                time_f.enable),
+        ("TimeFilter thresh",      filt.get('TimeFilter_Threshold'),      time_f.threshold),
+        ("ConfidenceFilter enable",   filt.get('ConfidenceFilter'),       conf_f.enable),
+        ("ConfidenceFilter thresh",   filt.get('ConfidenceFilter_Threshold'), conf_f.threshold),
+        ("FlyingPixelFilter enable",  filt.get('FlyingPixelFilter'),      fly_f.enable),
+        ("FlyingPixelFilter thresh",  filt.get('FlyingPixelFilter_Threshold'), fly_f.threshold),
+        ("Fillhole",               filt.get('Fillhole'),                  fillhole),
+        ("SpatialFilter",          filt.get('SpatialFilter'),             spatial),
+        ("Transform Depth→Color(常時False)", False,                      xform_d2c),
+        ("Transform Color→Depth(常時False)", False,                      xform_c2d),
+    ]
+
+    print("=== 実機に適用されているパラメータ（JSON期待値 vs 実機の読み戻し値） ===")
+    for label, json_val, actual_val in rows:
+        json_str = "-" if json_val is None else str(json_val)
+        match = (json_val is None) or (str(json_val) == str(actual_val))
+        mark = "OK " if match else "!! "
+        print(f"  {mark}{label:<28} JSON={json_str:<14} 実機={actual_val}")
+    print("=" * 60)
+
+
 def open_camera(cfg):
     """デバイスを検出・オープンし、ストリームを開始して返す。"""
     init_sdk(cfg)
@@ -119,8 +287,29 @@ def open_camera(cfg):
     if ret != 0:
         raise RuntimeError(f"scOpenDeviceBySN failed: {ret}")
 
-    # --- StartStream 前: FPS・解像度・ワークモード ---
-    # （config.yaml / CLI引数での明示上書き。デフォルトはparams_jsonのControlと同値）
+    # params_json が設定されているのに読み込めない場合は、意図しないパラメータのまま
+    # データ取得が進んでしまう事故を防ぐため、警告で済ませず即座に停止する
+    # （2026-07-10: JSON構文エラーが警告のみで見過ごされ、パラメータ未適用のまま
+    #   撮影を続けてしまった事例があったため）。
+    params_path = cfg['camera'].get('params_json')
+    params = None
+    if params_path:
+        params = _load_params_json(params_path)
+        if params is None:
+            cam.scCloseDevice()
+            raise RuntimeError(
+                f"params_json の読み込みに失敗しました（{params_path}）。"
+                "JSONの構文を確認してください（例: //コメントはJSON非対応）。"
+            )
+    else:
+        print("警告: camera.params_json が未設定のため、パラメータJSONは適用されません")
+
+    # --- StartStream 前: ToF解像度・FPS・Color解像度・ワークモード ---
+    # （ToF解像度はJSONの値をそのまま適用。FPS/Color解像度はconfig.yaml/CLI引数での
+    #   明示上書き。デフォルトはparams_jsonのControlと同値）
+    if params:
+        _apply_tof_resolution(cam, params.get('Control', {}))
+
     fps = int(cfg['camera'].get('fps', 15))
     cam.scSetFrameRate(c_uint8(fps))
 
@@ -143,21 +332,14 @@ def open_camera(cfg):
     # GUITool が有効にしたまま終了した設定を解除する（params_json の対象外の項目）
     cam.scSetTransformDepthImgToColorSensorEnabled(False)
     cam.scSetTransformColorImgToDepthSensorEnabled(False)
-    cam.scSetHDRModeEnabled(False)   # HDR有効時はToFが正常に動かない場合がある
-    cam.scSetWDRModeEnabled(False)
 
-    # --- StartStream 後: ScepterGUIToolでエクスポートしたJSONを一括適用 ---
-    # 露光時間・フィルタ閾値・Fillhole・IRGm補正等はストリーム開始後でないと反映されない
-    # （SDKサンプル ToFExposureTimeSetGet / ToFFiltersSetGet と同じ順序: Open→StartStream→Set）
-    params_path = cfg['camera'].get('params_json')
-    if params_path:
-        ret = cam.scSetParamsByJson(params_path)
-        if ret != 0:
-            print(f"警告: scSetParamsByJson failed: {ret}  ({params_path})")
-        else:
-            print(f"カメラパラメータ適用: {params_path}")
-    else:
-        print("警告: camera.params_json が未設定のため、パラメータJSONは適用されません")
+    # --- StartStream 後: 露光・フィルタ・IRGm補正をJSONの値で個別API適用 ---
+    # ToF_ExposureTime等は深度性能に直結するため確実に反映させる必要がある。
+    if params:
+        _apply_exposure_and_filter_params(cam, params)
+        print(f"カメラパラメータ適用（個別API・{params_path}）")
+
+    _print_applied_params(cam, params)
 
     return cam
 
