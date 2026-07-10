@@ -75,8 +75,8 @@ try:
         elif key == ord('q'):
             sys.exit(0)
 
-    color_w  = int(_cfg['camera'].get('color_width', 1600))
-    color_h  = int(_cfg['camera'].get('color_height', 1200))
+    color_w  = int(_cfg['camera'].get('color_width', 640))
+    color_h  = int(_cfg['camera'].get('color_height', 480))
     h, w     = 480, 640
     vw_color = cv2.VideoWriter(color_path, fourcc, FPS, (color_w, color_h))
     vw_depth = cv2.VideoWriter(depth_path, fourcc, FPS, (w, h))

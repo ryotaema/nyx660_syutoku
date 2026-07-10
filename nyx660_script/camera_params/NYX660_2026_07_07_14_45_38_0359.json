@@ -1,0 +1,41 @@
+{
+    "Control": {
+        "ColorResolution": "640*480",
+        "FrameRate": 15,
+        "IRGmmCorrectionEnabled": false,
+        "IRGmmCorrectionThreshold": 50,
+        "IRGmmGain": 25,
+        "ToFResolution": "640*480",
+        "WorkMode": "ActiveMode"
+    },
+    "ExposureTime": {
+        "ColorAECROI": [
+            0,
+            0,
+            640,
+            480
+        ],
+        "Color_ExposureMode": "Auto",
+        "Color_ExposureTime": 65000,
+        "HDR_Mode": false,
+        "ToF_ExposureMode": "Manual",
+        "ToF_ExposureTime": 3000,
+        "WDR_Mode": false
+    },
+    "Filter": {
+        "ConfidenceFilter": true,
+        "ConfidenceFilter_Threshold": 14,
+        "Fillhole": true,
+        "FlyingPixelFilter": true,
+        "FlyingPixelFilter_Threshold": 3,
+        "SpatialFilter": false,
+        "TimeFilter": true,
+        "TimeFilter_Threshold": 3
+    },
+    "Info": {
+        "FW": "NYX650_R_20260311_B41",
+        "GUIVersion": "26.04.1",
+        "Modle": "NYX660",
+        "SDKVersion": "26.03.1.0"
+    }
+}

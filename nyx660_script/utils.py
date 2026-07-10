@@ -1,5 +1,6 @@
 import yaml
 import argparse
+import json
 import sys
 import os
 import struct
@@ -27,6 +28,14 @@ def load_config():
     # sdk_path: 相対パスならconfig.yaml基準で解決
     p = cfg['sdk_path']
     cfg['sdk_path'] = str((cfg_dir / p).resolve()) if not os.path.isabs(p) else p
+    # camera.params_json: 相対パスならconfig.yaml基準で解決
+    p = cfg.get('camera', {}).get('params_json')
+    if p:
+        params_path = str((cfg_dir / p).resolve()) if not os.path.isabs(p) else p
+        cfg['camera']['params_json'] = params_path
+        # fps/color_width/color_height が config.yaml に明示されていなければ
+        # params_json（唯一の情報源）から読み取ってデフォルトにする
+        _fill_camera_defaults_from_params_json(cfg['camera'], params_path)
     # output paths: ~展開 → 相対パスならconfig.yaml基準で解決
     for key in ('images_dir', 'pointcloud_dir', 'timelapse_dir', 'mp4_dir'):
         if key not in cfg['output']:
@@ -34,6 +43,30 @@ def load_config():
         p = os.path.expanduser(cfg['output'][key])
         cfg['output'][key] = str((cfg_dir / p).resolve()) if not os.path.isabs(p) else p
     return cfg
+
+
+def _fill_camera_defaults_from_params_json(camera_cfg, params_path):
+    """params_json の Control.FrameRate / ColorResolution を
+    fps / color_width / color_height のデフォルト値として camera_cfg に補完する。
+    config.yaml 側に明示指定があればそちらを優先し、上書きしない。
+    """
+    try:
+        with open(params_path) as f:
+            params = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"警告: params_json の読み込みに失敗しました（{params_path}）: {e}")
+        return
+
+    control = params.get('Control', {})
+    if 'fps' not in camera_cfg and 'FrameRate' in control:
+        camera_cfg['fps'] = int(control['FrameRate'])
+
+    if 'color_width' not in camera_cfg and 'color_height' not in camera_cfg:
+        res = control.get('ColorResolution')  # 例: "640*480"
+        if res and '*' in res:
+            w, h = res.split('*')
+            camera_cfg['color_width'] = int(w)
+            camera_cfg['color_height'] = int(h)
 
 
 def build_parser():
@@ -69,8 +102,6 @@ def open_camera(cfg):
     """デバイスを検出・オープンし、ストリームを開始して返す。"""
     init_sdk(cfg)
     from API.ScepterDS_api import ScepterTofCam
-    from API.ScepterDS_types import (ScTimeFilterParams, ScConfidenceFilterParams,
-                                      ScFlyingPixelFilterParams)
     from API.ScepterDS_enums import ScWorkMode
 
     cam = ScepterTofCam()
@@ -89,13 +120,14 @@ def open_camera(cfg):
         raise RuntimeError(f"scOpenDeviceBySN failed: {ret}")
 
     # --- StartStream 前: FPS・解像度・ワークモード ---
-    fps = int(cfg['camera'].get('fps', 30))
+    # （config.yaml / CLI引数での明示上書き。デフォルトはparams_jsonのControlと同値）
+    fps = int(cfg['camera'].get('fps', 15))
     cam.scSetFrameRate(c_uint8(fps))
 
-    color_w = int(cfg['camera'].get('color_width', 1600))
-    color_h = int(cfg['camera'].get('color_height', 1200))
+    color_w = int(cfg['camera'].get('color_width', 640))
+    color_h = int(cfg['camera'].get('color_height', 480))
     cam.scSetColorResolution(c_int32(color_w), c_int32(color_h))
-    print(f"color解像度: {color_w}×{color_h}")
+    print(f"color解像度: {color_w}×{color_h}  FPS: {fps}")
 
     # アクティブモードを明示設定（ScepterGUIToolがトリガーモードで終了した場合の対処）
     ret = cam.scSetWorkMode(ScWorkMode.SC_ACTIVE_MODE)
@@ -108,31 +140,24 @@ def open_camera(cfg):
         raise RuntimeError(f"scStartStream failed: {ret}")
 
     # --- StartStream 後: カメラ状態をリセット ---
-    # GUITool が有効にしたまま終了した設定を解除する
+    # GUITool が有効にしたまま終了した設定を解除する（params_json の対象外の項目）
     cam.scSetTransformDepthImgToColorSensorEnabled(False)
     cam.scSetTransformColorImgToDepthSensorEnabled(False)
     cam.scSetHDRModeEnabled(False)   # HDR有効時はToFが正常に動かない場合がある
     cam.scSetWDRModeEnabled(False)
 
-    # --- フィルタ設定（SDK サンプルの正しい順序）---
-    flt = cfg.get('filters', {})
-
-    tf = ScTimeFilterParams()
-    tf.threshold = int(flt.get('time_filter', 3))
-    tf.enable = True
-    cam.scSetTimeFilterParams(tf)
-
-    cf = ScConfidenceFilterParams()
-    cf.threshold = int(flt.get('confidence', 15))
-    cf.enable = True
-    cam.scSetConfidenceFilterParams(cf)
-
-    fp = ScFlyingPixelFilterParams()
-    fp.threshold = int(flt.get('flying_pixel', 5))
-    fp.enable = True
-    cam.scSetFlyingPixelFilterParams(fp)
-
-    cam.scSetSpatialFilterEnabled(bool(flt.get('spatial', False)))
+    # --- StartStream 後: ScepterGUIToolでエクスポートしたJSONを一括適用 ---
+    # 露光時間・フィルタ閾値・Fillhole・IRGm補正等はストリーム開始後でないと反映されない
+    # （SDKサンプル ToFExposureTimeSetGet / ToFFiltersSetGet と同じ順序: Open→StartStream→Set）
+    params_path = cfg['camera'].get('params_json')
+    if params_path:
+        ret = cam.scSetParamsByJson(params_path)
+        if ret != 0:
+            print(f"警告: scSetParamsByJson failed: {ret}  ({params_path})")
+        else:
+            print(f"カメラパラメータ適用: {params_path}")
+    else:
+        print("警告: camera.params_json が未設定のため、パラメータJSONは適用されません")
 
     return cam
 
