@@ -1,14 +1,12 @@
 import sys
-import os
 import gc
 import numpy as np
 import cv2
 from pathlib import Path
-from datetime import datetime
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import load_config, build_parser, apply_args, init_sdk, open_camera, close_camera
-from utils import extract_depth, extract_color, extract_ir, make_depth_colormap
+from utils import extract_depth, extract_color, extract_ir, make_depth_colormap, Session
 
 _args = build_parser().parse_args()
 _cfg  = apply_args(load_config(), _args)
@@ -20,26 +18,10 @@ from ctypes import c_uint16
 _depth_alpha = _cfg['camera'].get('depth_alpha', 0.4)
 
 # --- 保存ディレクトリ設定 ---
-save_dir_base = os.path.expanduser(_cfg['output']['images_dir'])
-_now     = datetime.now()
-date_key = _now.strftime('%Y_%m%d')
-date_str = _now.strftime('%Y-%m-%d')
-time_str = _now.strftime('%H%M%S')
-save_dir_dated = os.path.join(save_dir_base, date_key)
-os.makedirs(save_dir_dated, exist_ok=True)
+_mods   = ['color', 'depth', 'depth_colormap', 'ir']
+session = Session(_cfg['output']['images_dir'], tag=_args.tag, subdirs=_mods)
 
-existing = [d for d in os.scandir(save_dir_dated) if d.is_dir() and d.name.startswith('image')]
-N = len(existing) + 1
-base_path = os.path.join(save_dir_dated, f"image{N}_{date_str}_{time_str}_NYX660")
-
-path_color    = os.path.join(base_path, "color")
-path_depth    = os.path.join(base_path, "depth")
-path_depth_cm = os.path.join(base_path, "depth_colormap")
-path_ir       = os.path.join(base_path, "ir")
-for p in [path_color, path_depth, path_depth_cm, path_ir]:
-    os.makedirs(p, exist_ok=True)
-
-print(f"保存先: {base_path}")
+print(f"保存先: {session.dir}")
 
 # --- カメラ初期化 ---
 try:
@@ -117,13 +99,13 @@ try:
         depth_cm = make_depth_colormap(depth, _depth_alpha)
         cv2.imshow('NYX660', _make_preview(color, depth_cm, ir))
 
-        cv2.imwrite(os.path.join(path_color,    f"{i}_color.jpg"),          color)
-        cv2.imwrite(os.path.join(path_depth,    f"{i}_depth.png"),          depth)
-        cv2.imwrite(os.path.join(path_depth_cm, f"{i}_depth_colormap.jpg"), depth_cm)
-        if ir is not None:
-            cv2.imwrite(os.path.join(path_ir, f"{i}_ir.jpg"), ir)
-
         i += 1
+        cv2.imwrite(session.path(i, 'color'),                color)
+        cv2.imwrite(session.path(i, 'depth', ext='png'),     depth)
+        cv2.imwrite(session.path(i, 'depth_colormap'),       depth_cm)
+        if ir is not None:
+            cv2.imwrite(session.path(i, 'ir'), ir)
+
         print(f"\rsaved: {i} frames", end="", flush=True)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -131,7 +113,15 @@ try:
             break
 
 finally:
-    print(f"\n合計 {i} フレーム保存 → {base_path}")
+    print(f"\n合計 {i} フレーム保存 → {session.dir}")
+    session.write_metadata(
+        camera={'model': 'NYX660',
+                'resolution': [_cfg['camera'].get('color_width'), _cfg['camera'].get('color_height')],
+                'fps': _cfg['camera'].get('fps'),
+                'params_json': _cfg['camera'].get('params_json')},
+        modalities=_mods,
+        shot_count=i,
+    )
     close_camera(cam)
     cv2.destroyAllWindows()
     gc.collect()

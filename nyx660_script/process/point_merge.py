@@ -55,10 +55,45 @@ def icp_register(o3d, source, target, threshold, init=None):
     return result.transformation, result.fitness, result.inlier_rmse
 
 
+MERGED_NAME = 'merged_pc.ply'          # 新命名での出力名
+_LEGACY_MERGED_NAME = 'merged_pointcloud.ply'
+
+
 def find_latest_session(output_dir):
+    """output_dir 以下（<日付>/<セッション>/）の最新セッションディレクトリを返す。
+
+    新命名 <YYMMDD>/<cam>_<YYMMDD>_<HHMMSS>/ と
+    旧命名 <YYYY_MMDD>/pc<N>_.../ の両方を拾う。
+    """
     base     = Path(output_dir).expanduser()
-    sessions = sorted(base.glob('*/pc*'))
+    sessions = sorted(d for d in base.glob('*/*') if d.is_dir())
     return sessions[-1] if sessions else None
+
+
+def session_prefix(session_dir):
+    """セッションの命名prefix（<cam>_<YYMMDD>_<HHMMSS>）を返す。
+    metadata.json があればそこから取り、無ければディレクトリ名で代用する。"""
+    meta = session_dir / 'metadata.json'
+    if meta.exists():
+        try:
+            with open(meta) as f:
+                sid = json.load(f).get('session_id')
+            if sid:
+                return sid
+        except (OSError, json.JSONDecodeError):
+            pass
+    return session_dir.name
+
+
+def collect_ply_files(session_dir):
+    """セッション直下の点群PLYを列挙する（マージ結果は除外）。
+
+    新命名 <prefix>_00042_pc.ply / 旧命名 0042_pointcloud.ply の両方に対応。
+    """
+    found = list(session_dir.glob('*_pc.ply')) + list(session_dir.glob('*_pointcloud.ply'))
+    return sorted(f for f in found
+                  if f.name not in (MERGED_NAME, _LEGACY_MERGED_NAME)
+                  and not f.name.endswith('_' + MERGED_NAME))
 
 
 def main():
@@ -103,11 +138,10 @@ def main():
             print(f"ディレクトリが見つかりません: {session_dir}")
             sys.exit(1)
 
-    ply_files = sorted(f for f in session_dir.glob('*_pointcloud.ply')
-                       if f.name != 'merged_pointcloud.ply')
+    ply_files = collect_ply_files(session_dir)
     n = len(ply_files)
     if n == 0:
-        print(f"*_pointcloud.ply が見つかりません: {session_dir}")
+        print(f"点群PLY（*_pc.ply / *_pointcloud.ply）が見つかりません: {session_dir}")
         sys.exit(1)
 
     full_resolution = args.full_resolution
@@ -185,7 +219,7 @@ def main():
         merged = merged.voxel_down_sample(voxel_size)
         print(f"ダウンサンプリング: {before:,} → {len(merged.points):,} 点")
 
-    out_path = session_dir / 'merged_pointcloud.ply'
+    out_path = session_dir / f'{session_prefix(session_dir)}_{MERGED_NAME}'
     o3d.io.write_point_cloud(str(out_path), merged)
     print(f"完了: {len(merged.points):,} 点 → {out_path}")
 
@@ -195,7 +229,7 @@ def main():
         'voxel_size':    voxel_size,
         'icp_threshold': icp_threshold,
         'output_points': len(merged.points),
-        'output_file':   'merged_pointcloud.ply',
+        'output_file':   out_path.name,
         'transforms':    [T.tolist() for T in transforms],
     }
     with open(session_dir / 'merge_result.json', 'w') as f:

@@ -2,11 +2,10 @@ import sys
 import os
 import gc
 from pathlib import Path
-from datetime import datetime
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import load_config, build_parser, apply_args, init_sdk, open_camera, close_camera
-from utils import extract_color, extract_depth, get_bbox_depth
+from utils import extract_color, extract_depth, get_bbox_depth, make_prefix
 
 import cv2
 import numpy as np
@@ -38,8 +37,8 @@ from ultralytics import YOLO
 model = YOLO(MODEL_PATH)
 print(f"モデル読み込み: {MODEL_PATH}")
 
-timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-mp4_path  = os.path.join(save_dir, f'detected_{timestamp}.mp4')
+# 動画はショット連番を持たないため {cam}_{YYMMDD}_{HHMMSS}_{種別}.{ext} で命名する
+mp4_path = os.path.join(save_dir, f'{make_prefix()}_det.mp4')
 
 try:
     cam = open_camera(_cfg)

@@ -2,11 +2,10 @@ import sys
 import os
 import gc
 from pathlib import Path
-from datetime import datetime
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import load_config, build_parser, apply_args, init_sdk, open_camera, close_camera
-from utils import extract_color, extract_depth, make_depth_colormap
+from utils import extract_color, extract_depth, make_depth_colormap, make_prefix
 
 import cv2
 import numpy as np
@@ -23,9 +22,10 @@ depth_alpha = _cfg['camera'].get('depth_alpha', 0.4)
 save_dir    = _cfg['output']['mp4_dir']
 os.makedirs(save_dir, exist_ok=True)
 
-timestamp  = datetime.now().strftime('%Y%m%d_%H%M%S')
-color_path = os.path.join(save_dir, f'color_{timestamp}.mp4')
-depth_path = os.path.join(save_dir, f'depth_{timestamp}.mp4')
+# 動画はショット連番を持たないため {cam}_{YYMMDD}_{HHMMSS}_{種別}.{ext} で命名する
+prefix     = make_prefix()
+color_path = os.path.join(save_dir, f'{prefix}_c.mp4')
+depth_path = os.path.join(save_dir, f'{prefix}_dc.mp4')
 
 try:
     cam = open_camera(_cfg)

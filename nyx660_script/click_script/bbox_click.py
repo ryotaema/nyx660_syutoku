@@ -158,15 +158,27 @@ def load_yolo_format(image_path):
     return loaded
 
 def load_points(image_path):
-    # ファイル名（例: 1735071234.jpg）からID部分を抽出
-    basename = os.path.basename(image_path)
-    # 拡張子を除去し、「image_」などの接頭辞があれば除去
-    token = os.path.splitext(basename)[0].replace("image_", "")
-    
-    # points_1735071234.txt のような形式を探す
-    p_path = os.path.join(base_dir, "points", f"points_{token}.txt")
+    """画像に対応するクリック座標ファイルを探して読み込む。
+
+    新命名 <prefix>_00042_c.jpg は、末尾のモダリティコードを pt に差し替えた
+    <prefix>_00042_pt.txt が対応ファイルになる（同一ディレクトリ / points/ の順に探す）。
+    旧命名 image_<ts>.jpg ↔ points/points_<ts>.txt も引き続き読める。
+    """
+    img_dir  = os.path.dirname(image_path)
+    stem     = os.path.splitext(os.path.basename(image_path))[0]
+
+    candidates = []
+    if stem.endswith("_c"):
+        pt_name = stem[:-2] + "_pt.txt"
+        candidates += [os.path.join(img_dir,  pt_name),
+                       os.path.join(base_dir, "points", pt_name)]
+    # 旧命名: 「image_」などの接頭辞を除いたIDで points_<ID>.txt を探す
+    token = stem.replace("image_", "")
+    candidates.append(os.path.join(base_dir, "points", f"points_{token}.txt"))
+
     points = []
-    if os.path.exists(p_path):
+    p_path = next((p for p in candidates if os.path.exists(p)), None)
+    if p_path:
         with open(p_path, "r") as f:
             for line in f:
                 try:

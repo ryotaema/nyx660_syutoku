@@ -15,6 +15,7 @@ if 'DISPLAY' not in os.environ:
             os.environ['XAUTHORITY'] = xauth
 import numpy as np
 import cv2
+from datetime import datetime
 from pathlib import Path
 from ctypes import c_uint8, c_int32, c_uint16, c_bool
 
@@ -75,6 +76,9 @@ def build_parser():
                    help='FPS（config.yaml の値を上書き）')
     p.add_argument('--color-size', type=str, default=None, metavar='WxH',
                    help='color解像度 例: 800x600（config.yaml の値を上書き）')
+    p.add_argument('--tag', type=str, default=None, metavar='NAME',
+                   help='セッションディレクトリ名に付ける任意タグ 例: greenhouse'
+                        '（ファイル名には付かない）')
     return p
 
 
@@ -89,6 +93,113 @@ def apply_args(cfg, args):
         except ValueError:
             print(f"警告: --color-size の形式が不正です（例: 800x600）。デフォルト値を使用します。")
     return cfg
+
+
+# ============================================================================
+# データ命名規則  （real_syutoku / nyx660_syutoku 共通。両者で同一の実装を置く）
+#
+#   {cam}_{YYMMDD}_{HHMMSS}_{NNNNN}_{mod}.{ext}
+#   例) nyx_260707_101741_00042_c.jpg
+#
+#   cam    : カメラコード（nyx / d435 / d405）。リポジトリを跨いでも衝突しない
+#   YYMMDD : 取得日
+#   HHMMSS : セッション開始時刻。1プロセス＝1セッションで固定値
+#   NNNNN  : セッション内のショット連番（撮影時刻ではない）。
+#            同一ショットの color/depth/ir は全て同じ番号を共有するため、
+#            末尾トークンの差し替えだけで対応するファイルを引ける
+#   mod    : モダリティコード（下表 MOD_CODES）
+#
+# ファイル名だけで「どのカメラの・いつの・何枚目の・何の画像か」が復元できるので、
+# 学習用に flatten しても labelImg にまとめて放り込んでも識別性が壊れない。
+# 撮影条件などファイル名に載せない情報は metadata.json に記録する。
+# ============================================================================
+
+CAM = 'nyx'  # このリポジトリはNYX660固定
+
+# サブディレクトリ名 → モダリティコード
+# （キーがそのままセッション配下のサブディレクトリ名になる）
+MOD_CODES = {
+    'color':          'c',
+    'depth':          'd',      # 16bit raw（png）
+    'depth_colormap': 'dc',
+    'ir':             'i1',     # 単眼IR（NYX660）
+    'ir_left':        'i1',
+    'ir_right':       'i2',
+    'ir_left_color':  'i1c',
+    'ir_right_color': 'i2c',
+    'pointcloud':     'pc',
+    'points':         'pt',     # クリック座標などのテキスト
+    'detected':       'det',    # YOLO描画済み
+    'annotated':      'det',
+}
+
+
+def mod_code(modality):
+    """モダリティ名 → コード。未登録の名前はそのまま使う。"""
+    return MOD_CODES.get(modality, modality)
+
+
+def make_prefix(cam=CAM, started_at=None):
+    """セッションprefix（{cam}_{YYMMDD}_{HHMMSS}）を返す。mp4 など
+    セッションディレクトリを作らない出力でも同じ規則を使うためのヘルパー。"""
+    now = started_at or datetime.now()
+    return f"{cam}_{now.strftime('%y%m%d')}_{now.strftime('%H%M%S')}"
+
+
+class Session:
+    """1回の取得セッション。保存先ディレクトリとファイル名の生成を一元管理する。
+
+    <base_dir>/<YYMMDD>/<prefix>[_<tag>]/<modality>/<prefix>_<NNNNN>_<mod>.<ext>
+
+    tag はセッションディレクトリ名にだけ付く（ファイル名の桁を汚さないため）。
+    ディレクトリ名はファイル名の prefix に前方一致するので対応関係は保たれる。
+    """
+
+    def __init__(self, base_dir, cam=CAM, tag=None, subdirs=(), started_at=None):
+        self.started_at = started_at or datetime.now()
+        self.cam    = cam
+        self.tag    = tag
+        self.date   = self.started_at.strftime('%y%m%d')
+        self.time   = self.started_at.strftime('%H%M%S')
+        self.prefix = make_prefix(cam, self.started_at)
+
+        dir_name = f"{self.prefix}_{tag}" if tag else self.prefix
+        self.dir = Path(os.path.expanduser(str(base_dir))) / self.date / dir_name
+        self.dir.mkdir(parents=True, exist_ok=True)
+        for sub in subdirs:
+            (self.dir / sub).mkdir(exist_ok=True)
+
+    def name(self, idx, modality, ext='jpg'):
+        """ファイル名のみを返す。"""
+        return f"{self.prefix}_{idx:05d}_{mod_code(modality)}.{ext}"
+
+    def path(self, idx, modality, ext='jpg', sub=True):
+        """保存先のフルパスを返す（ディレクトリは自動作成）。
+
+        sub=True  : <dir>/<modality>/ に置く（既定）
+        sub=False : <dir>/ 直下に置く
+        sub='xxx' : <dir>/xxx/ に置く
+        """
+        d = self.dir if sub is False else self.dir / (modality if sub is True else sub)
+        d.mkdir(parents=True, exist_ok=True)
+        return str(d / self.name(idx, modality, ext))
+
+    def file(self, suffix, ext):
+        """連番を持たないセッション単位のファイル（動画など）のフルパスを返す。"""
+        return str(self.dir / f"{self.prefix}_{suffix}.{ext}")
+
+    def write_metadata(self, **info):
+        """metadata.json を書き出す。撮影条件など、ファイル名に載せない情報はここに。"""
+        meta = {
+            'session_id': self.prefix,
+            'camera_code': self.cam,
+            'started_at': self.started_at.isoformat(timespec='seconds'),
+            'tag': self.tag,
+            'naming': '{cam}_{YYMMDD}_{HHMMSS}_{NNNNN}_{mod}.{ext}',
+        }
+        meta.update(info)
+        with open(self.dir / 'metadata.json', 'w') as f:
+            json.dump(meta, f, indent=2, ensure_ascii=False)
 
 
 def init_sdk(cfg):

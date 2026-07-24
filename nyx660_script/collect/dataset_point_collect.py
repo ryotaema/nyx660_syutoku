@@ -5,11 +5,10 @@ import json
 import numpy as np
 import cv2
 from pathlib import Path
-from datetime import datetime
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import load_config, build_parser, apply_args, init_sdk, open_camera, close_camera
-from utils import extract_depth, extract_color, make_depth_colormap, save_ply
+from utils import extract_depth, extract_color, make_depth_colormap, save_ply, Session
 
 _parser = build_parser()
 _parser.add_argument('--frames', type=int, default=None, metavar='N',
@@ -28,18 +27,10 @@ capture_frames = _args.frames if _args.frames is not None else _cfg['pointcloud'
 _depth_alpha   = _cfg['camera'].get('depth_alpha', 0.4)
 
 # --- 保存ディレクトリ設定 ---
-_pc_base = Path(os.path.expanduser(_cfg['output']['pointcloud_dir']))
-_now     = datetime.now()
-date_key = _now.strftime('%Y_%m%d')
-date_str = _now.strftime('%Y-%m-%d')
-time_str = _now.strftime('%H%M%S')
-_date_dir = _pc_base / date_key
-_date_dir.mkdir(parents=True, exist_ok=True)
-
-existing = [d for d in _date_dir.iterdir() if d.is_dir() and d.name.startswith('pc')]
-N = len(existing) + 1
-save_dir = str(_date_dir / f"pc{N}_{date_str}_{time_str}_NYX660")
-os.makedirs(save_dir, exist_ok=True)
+# color/depth/ply は点群処理でまとめて扱うためセッション直下にフラットに置く
+# （point_merge.py が session_dir 直下を走査する）
+session  = Session(_cfg['output']['pointcloud_dir'], tag=_args.tag)
+save_dir = str(session.dir)
 
 mode_label = f"auto ({capture_frames} frames)" if mode == 'auto' else "manual"
 print(f"保存先: {save_dir}")
@@ -82,14 +73,7 @@ with open(os.path.join(save_dir, 'intrinsics.json'), 'w') as f:
     json.dump(intrinsics_data, f, indent=2)
 
 # --- メタデータ初期化 ---
-metadata = {
-    'mode':           mode,
-    'capture_frames': capture_frames if mode == 'auto' else None,
-    'actual_frames':  0,
-    'fps':            _cfg['camera'].get('fps', 30),
-    'timestamp':      datetime.now().isoformat(),
-    'frames':         [],
-}
+_frames_meta = []
 
 
 def save_frame(idx, cam):
@@ -111,22 +95,29 @@ def save_frame(idx, cam):
     if color is None or depth is None:
         return False
 
-    prefix = os.path.join(save_dir, f"{idx:04d}")
-    cv2.imwrite(prefix + '_color.jpg', color)
-    cv2.imwrite(prefix + '_depth.png', depth)
+    cv2.imwrite(session.path(idx, 'color', sub=False), color)
+    cv2.imwrite(session.path(idx, 'depth', ext='png', sub=False), depth)
 
     ret, pointlist = cam.scConvertDepthFrameToPointCloudVector(df)
     if ret == 0:
-        save_ply(prefix + '_pointcloud.ply', pointlist, df.width * df.height)
+        save_ply(session.path(idx, 'pointcloud', ext='ply', sub=False),
+                 pointlist, df.width * df.height)
 
-    metadata['frames'].append({'index': idx, 'hardwaretimestamp': int(hw_ts)})
+    _frames_meta.append({'index': idx, 'hardwaretimestamp': int(hw_ts)})
     return True
 
 
 def write_metadata(actual_frames):
-    metadata['actual_frames'] = actual_frames
-    with open(os.path.join(save_dir, 'metadata.json'), 'w') as f:
-        json.dump(metadata, f, indent=2)
+    session.write_metadata(
+        camera={'model': 'NYX660',
+                'resolution': [_cfg['camera'].get('color_width'), _cfg['camera'].get('color_height')],
+                'fps': _cfg['camera'].get('fps', 30),
+                'params_json': _cfg['camera'].get('params_json')},
+        mode=mode,
+        capture_frames=capture_frames if mode == 'auto' else None,
+        actual_frames=actual_frames,
+        frames=_frames_meta,
+    )
 
 
 frame_count = 0
@@ -155,7 +146,7 @@ try:
 
         print(f"取得中... (0/{capture_frames})")
         while frame_count < capture_frames:
-            if save_frame(frame_count, cam):
+            if save_frame(frame_count + 1, cam):
                 frame_count += 1
                 print(f"\rsaved: {frame_count}/{capture_frames} frames", end="", flush=True)
         print()
@@ -175,7 +166,7 @@ try:
                     cv2.imshow('NYX660_pointcloud', cv2.resize(preview, (800, 600)))
             key = cv2.waitKey(1) & 0xFF
             if key == ord('s'):
-                if save_frame(frame_count, cam):
+                if save_frame(frame_count + 1, cam):
                     frame_count += 1
                     print(f"saved: {frame_count} frames")
             elif key == ord('q'):

@@ -1,23 +1,25 @@
 import sys
-import os
 import gc
 from pathlib import Path
-from datetime import datetime
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from utils import load_config, init_sdk, open_camera, close_camera, extract_color
+from utils import load_config, build_parser, apply_args, init_sdk, open_camera, close_camera
+from utils import extract_color, Session
 
 import cv2
 import numpy as np
 from ctypes import c_uint16
 
-_cfg = load_config()
+_args = build_parser().parse_args()
+_cfg  = apply_args(load_config(), _args)
 init_sdk(_cfg)
 
 from API.ScepterDS_enums import ScFrameType
 
-save_dir = os.path.join(_cfg['output']['images_dir'], 'click_test_data')
-os.makedirs(save_dir, exist_ok=True)
+# 画像とクリック座標をペアで置くためセッション直下にフラット配置
+_base_dir = Path(_cfg['output']['images_dir']).parent / 'click_test_data'
+session   = Session(_base_dir, tag=_args.tag)
+print(f"保存先: {session.dir}")
 
 click_points  = []
 current_frame = None
@@ -42,6 +44,7 @@ cv2.namedWindow('NYX660', cv2.WINDOW_AUTOSIZE)
 cv2.setMouseCallback('NYX660', mouse_callback)
 
 _last_color = None
+shot_count  = 0
 
 try:
     while True:
@@ -64,9 +67,10 @@ try:
         key = cv2.waitKey(1) & 0xFF
 
         if key == ord('s'):
-            ts         = datetime.now().strftime("%Y%m%d_%H%M%S")
-            image_path = os.path.join(save_dir, f"image_{ts}.jpg")
-            txt_path   = os.path.join(save_dir, f"points_{ts}.txt")
+            # 画像とクリック座標は同じ連番を共有する
+            shot_count += 1
+            image_path = session.path(shot_count, 'color', sub=False)
+            txt_path   = session.path(shot_count, 'points', ext='txt', sub=False)
 
             cv2.imwrite(image_path, _last_color)
             with open(txt_path, 'w') as f:
@@ -80,6 +84,13 @@ try:
             break
 
 finally:
+    session.write_metadata(
+        camera={'model': 'NYX660',
+                'resolution': [_cfg['camera'].get('color_width'), _cfg['camera'].get('color_height')],
+                'fps': _cfg['camera'].get('fps')},
+        modalities=['color', 'points'],
+        shot_count=shot_count,
+    )
     close_camera(cam)
     cv2.destroyAllWindows()
     gc.collect()

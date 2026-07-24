@@ -25,10 +25,13 @@ nyx660_syutoku/
 │   └── click_script/
 │       ├── bbox_click.py             # 画像に YOLO 形式 BBox を手動アノテーション
 │       └── click_dataset.py          # カメラ映像をクリックして座標＋画像を保存
+├── tools/
+│   ├── rename_legacy.py     # 旧命名データを新命名規則へ変換（CLI）
+│   └── rename_legacy_gui.py # 同上（GUI）
 └── data/
-    ├── images/           # 収集画像
-    ├── pointcloud/       # 点群データ
-    ├── timelapse_data/   # タイムラプスセッション
+    ├── images/           # 収集画像（YYMMDD/nyx_YYMMDD_HHMMSS/）
+    ├── pointcloud/       # 点群データ（YYMMDD/nyx_YYMMDD_HHMMSS/）
+    ├── timelapse_data/   # タイムラプスセッション（YYMMDD/nyx_YYMMDD_HHMMSS/）
     └── mp4/              # 録画動画
 ```
 
@@ -119,6 +122,7 @@ model:
 |---|---|---|
 | `--fps N` | FPS を上書き | `--fps 15` |
 | `--color-size WxH` | color 解像度を上書き | `--color-size 800x600` |
+| `--tag NAME` | セッションディレクトリ名にタグを付与（ファイル名には付かない） | `--tag greenhouse` |
 
 スクリプト固有のオプション：
 
@@ -209,56 +213,159 @@ python3 click_dataset.py
 python3 bbox_click.py
 ```
 
+## データ命名規則
+
+すべての収集データは，ファイル名だけで「どのカメラの・いつの・何枚目の・何の画像か」が
+分かるように統一されています．学習用に1つのフォルダへ集約しても，アノテーションツールに
+まとめて読み込ませても，どのセッションのデータか判別できなくなることがありません．
+
+```
+{cam}_{YYMMDD}_{HHMMSS}_{NNNNN}_{mod}.{ext}
+
+nyx_260707_101741_00042_c.jpg
+ │       │      │      │     └─ モダリティコード
+ │       │      │      └─────── セッション内のショット連番（撮影時刻ではない）
+ │       │      └────────────── セッション開始時刻
+ │       └───────────────────── 取得日
+ └───────────────────────────── カメラコード
+```
+
+| 要素 | 説明 |
+|------|------|
+| `cam` | `nyx`（NYX660）．real_syutoku 側は `d435` / `d405` を使うため，リポジトリを跨いでも衝突しません |
+| `YYMMDD` | 取得日 |
+| `HHMMSS` | セッション開始時刻．1プロセス＝1セッションで固定です |
+| `NNNNN` | セッション内のショット連番．**同一ショットの color/depth/ir は同じ番号を共有します** |
+| `mod` | モダリティコード（下表） |
+
+**モダリティコード**
+
+| コード | 内容 | コード | 内容 |
+|--------|------|--------|------|
+| `c` | color | `pc` | 点群（.ply） |
+| `d` | depth（16bit raw PNG） | `pt` | クリック座標（.txt） |
+| `dc` | depth colormap | `det` | YOLO 描画済み |
+| `i1` | IR（NYX660 は単眼なのでこれ） | | |
+
+連番はショット単位で共有されるため，末尾のモダリティコードを差し替えるだけで対応する
+ファイルを引けます（`..._00042_c.jpg` ↔ `..._00042_d.png`）．YOLO のラベル `.txt` や
+labelImg の `.xml` も stem が一致するので自動的に紐づきます．
+
+撮影条件など，ファイル名に載せない情報は各セッションの `metadata.json` に記録されます．
+
+### セッションディレクトリとタグ
+
+```
+<出力先>/<YYMMDD>/<prefix>[_<tag>]/<モダリティ>/<ファイル>
+```
+
+`--tag` を付けると，セッションディレクトリ名にだけ任意の名前が付きます
+（ファイル名の桁は増えません）．
+
+```bash
+python3 collect/dataset_collect_photo.py --tag greenhouse
+# → images_dir/260707/nyx_260707_101741_greenhouse/color/nyx_260707_101741_00001_c.jpg
+```
+
 ## 保存形式
 
 ### 画像収集（dataset_collect / dataset_collect_photo）
 
 ```
-images_dir/YYYY_MMDD/imageN_YYYY-MM-DD_HHMMSS_NYX660/
-├── color/           {n}_color.jpg            # RGB（デフォルト 1600×1200）
-├── depth/           {n}_depth.png            # 生深度 16bit PNG（640×480、mm単位）
-├── depth_colormap/  {n}_depth_colormap.jpg   # 深度可視化
-└── ir/              {n}_ir.jpg               # IR グレースケール（640×480）
+images_dir/YYMMDD/nyx_YYMMDD_HHMMSS/
+├── color/           {prefix}_{NNNNN}_c.jpg    # RGB（デフォルト 1600×1200）
+├── depth/           {prefix}_{NNNNN}_d.png    # 生深度 16bit PNG（640×480、mm単位）
+├── depth_colormap/  {prefix}_{NNNNN}_dc.jpg   # 深度可視化
+├── ir/              {prefix}_{NNNNN}_i1.jpg   # IR グレースケール（640×480）
+└── metadata.json                              # カメラ設定・撮影枚数
 ```
 
 ### 点群収集（dataset_point_collect）
 
+point_merge.py がセッション直下を走査するため，フラットに配置されます．
+
 ```
-pointcloud_dir/YYYY_MMDD/pcN_YYYY-MM-DD_HHMMSS_NYX660/
-├── 0000_color.jpg
-├── 0000_depth.png        # 16bit PNG（mm単位）
-├── 0000_pointcloud.ply   # バイナリ PLY（z=0 / z=65535 除外済み）
-├── intrinsics.json       # ToF / Color 内部パラメータ + 外部パラメータ
-└── metadata.json         # 取得モード・フレーム数・hardwaretimestamp 一覧
+pointcloud_dir/YYMMDD/nyx_YYMMDD_HHMMSS/
+├── {prefix}_00001_c.jpg
+├── {prefix}_00001_d.png     # 16bit PNG（mm単位）
+├── {prefix}_00001_pc.ply    # バイナリ PLY（z=0 / z=65535 除外済み）
+├── intrinsics.json          # ToF / Color 内部パラメータ + 外部パラメータ
+└── metadata.json            # 取得モード・フレーム数・hardwaretimestamp 一覧
 ```
+
+`point_merge.py` の出力は `{prefix}_merged_pc.ply` です．
 
 ### タイムラプス（timelapse_detect）
 
 ```
-timelapse_data/YYYY_MMDD/timelapseN_YYYY-MM-DD_HHMMSS_NYX660/
-├── color/       {n}_color.jpg
-├── depth/       {n}_depth.png  /  {n}_depth_colormap.jpg
-├── ir/          {n}_ir.jpg
-├── annotated/   {n}_annotated.jpg   # --detect 時のみ（距離付きBBox）
-└── detection_log.csv                # --detect 時のみ
+timelapse_data/YYMMDD/nyx_YYMMDD_HHMMSS/
+├── color/           {prefix}_{NNNNN}_c.jpg
+├── depth/           {prefix}_{NNNNN}_d.png
+├── depth_colormap/  {prefix}_{NNNNN}_dc.jpg
+├── ir/              {prefix}_{NNNNN}_i1.jpg
+├── annotated/       {prefix}_{NNNNN}_det.jpg   # --detect 時のみ（距離付きBBox）
+├── detection_log.csv                           # --detect 時のみ
+└── metadata.json
 ```
+
+連番は5桁なので，長時間のタイムラプス（10秒間隔×24時間＝8640枚）でも桁が溢れません．
 
 `detection_log.csv` の列: `timestamp, elapsed_min, num_detections, avg_conf, max_conf, avg_depth_m, classes`
 
-### MP4 録画（mp4_collect）
+### MP4 録画（mp4_collect / record_with_yolo）
+
+動画はショット連番を持たないため，`{cam}_{YYMMDD}_{HHMMSS}_{種別}` で命名されます．
 
 ```
 mp4_dir/
-├── color_YYYYMMDD_HHMMSS.mp4   # RGB 動画
-└── depth_YYYYMMDD_HHMMSS.mp4   # depth colormap 動画（640×480）
+├── nyx_YYMMDD_HHMMSS_c.mp4     # RGB 動画
+├── nyx_YYMMDD_HHMMSS_dc.mp4    # depth colormap 動画（640×480）
+└── nyx_YYMMDD_HHMMSS_det.mp4   # YOLO + 距離オーバーレイ動画（640×480）
 ```
 
-### YOLO 録画（record_with_yolo）
+## 旧データの変換
 
+2026年7月より前に取得した旧命名（`imageN_YYYY-MM-DD_HHMMSS_NYX660/` など）のデータは，
+そのまま置いておけます．新命名に揃えたい場合は変換ツールを使ってください．
+
+旧ファイル名のモダリティ接尾辞（`_color` / `_depth_colormap` など）を手がかりに，
+同一ショットのファイルへ同じ連番を振り直します．`labels/*.txt` や `*.xml` も追従します．
+既定はコピーなので原データは残ります．
+
+### GUI（推奨）
+
+フォルダを選んで，変換後のファイル名を一覧で確認してから実行できます．
+データが複数の場所に散らばっている場合も，変換元フォルダをいくつでも登録できます．
+
+```bash
+python3 tools/rename_legacy_gui.py
 ```
-mp4_dir/
-└── detected_YYYYMMDD_HHMMSS.mp4   # YOLO + 距離オーバーレイ動画（640×480）
+
+1. **変換元フォルダ** — 「フォルダを追加...」で登録（複数可）．
+   データルート（`data/images`）を指定すれば配下のセッションをまとめて拾います．
+2. **設定** — カメラコードは通常「自動判別」のままで構いません．フォルダ名から
+   判別できないデータ（`click_test_data` など）はスキップ理由が表示されるので，
+   そのときだけ `nyx` を指定します．タグ・出力先・コピー/移動もここで指定．
+3. **プレビューを作成** — セッションごとに「変換前 → 変換後」が並びます．
+   行を開くと個々のファイル名を確認できます．
+4. **変換を実行** — プレビューを作るまで実行ボタンは押せません．
+
+`tkinter` が必要です（`sudo apt install python3-tk`）．
+
+### CLI
+
+```bash
+# 何が起きるか確認（dry-run。既定ではファイルを書き換えません）
+python3 tools/rename_legacy.py data/images
+
+# 実行（コピーで出力するため原データは残ります）
+python3 tools/rename_legacy.py data/images --apply
+
+# ディレクトリ名からカメラ・日時が分からないデータ
+python3 tools/rename_legacy.py data/click_test_data/250911_testdata_click --cam nyx --apply
 ```
+
+`--move` を付けると移動になります（原データが残らないので注意）．
 
 ## カメラ仕様（NYX660）
 

@@ -1,5 +1,4 @@
 import sys
-import os
 import gc
 import csv
 import time
@@ -9,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import load_config, build_parser, apply_args, init_sdk, open_camera, close_camera
 from utils import extract_color, extract_depth, extract_ir, make_depth_colormap, get_bbox_depth
+from utils import Session
 
 import cv2
 import numpy as np
@@ -48,9 +48,8 @@ CONF        = float(_cfg.get('model', {}).get('confidence_threshold', 0.5))
 INFER_SIZE  = (640, 480)  # depth と座標を合わせるため推論は 640×480 に統一
 
 # --- --detect: GUIでモデルを選択 ---
-model         = None
-annotated_dir = None
-log_path      = None
+model    = None
+log_path = None
 
 if _args.detect:
     _model_path = ''
@@ -78,29 +77,14 @@ if _args.detect:
         print(f"モデル読み込み: {_model_path}")
 
 # --- 出力先 ---
-_timelapse_base = Path(_cfg['output']['timelapse_dir'])
-_now      = datetime.now()
-date_key  = _now.strftime('%Y_%m%d')
-date_str  = _now.strftime('%Y-%m-%d')
-time_str  = _now.strftime('%H%M%S')
-_date_dir = _timelapse_base / date_key
-_date_dir.mkdir(parents=True, exist_ok=True)
-
-existing  = [d for d in _date_dir.iterdir() if d.is_dir() and d.name.startswith('timelapse')]
-N         = len(existing) + 1
-session_dir  = _date_dir / f"timelapse{N}_{date_str}_{time_str}_NYX660"
-color_dir    = session_dir / 'color'
-depth_dir    = session_dir / 'depth'
-ir_dir       = session_dir / 'ir'
-
-dirs = [color_dir, depth_dir, ir_dir]
+_mods = ['color', 'depth', 'depth_colormap', 'ir']
 if _args.detect:
-    annotated_dir = session_dir / 'annotated'
-    log_path      = session_dir / 'detection_log.csv'
-    dirs.append(annotated_dir)
+    _mods.append('annotated')
 
-for d in dirs:
-    d.mkdir(parents=True, exist_ok=True)
+session     = Session(_cfg['output']['timelapse_dir'], tag=_args.tag, subdirs=_mods)
+session_dir = session.dir
+if _args.detect:
+    log_path = session_dir / 'detection_log.csv'
 
 # --- カメラ初期化 ---
 try:
@@ -160,13 +144,12 @@ def _do_capture(shot_idx: int, start: float) -> bool:
         return False
 
     depth_vis = make_depth_colormap(depth, depth_alpha)
-    stem      = f'{shot_idx:04d}_{datetime.now().strftime("%H%M%S")}'
 
-    cv2.imwrite(str(color_dir / f'{stem}_color.jpg'), color)
-    cv2.imwrite(str(depth_dir / f'{stem}_depth.png'), depth)
-    cv2.imwrite(str(depth_dir / f'{stem}_depth_colormap.jpg'), depth_vis)
+    cv2.imwrite(session.path(shot_idx, 'color'), color)
+    cv2.imwrite(session.path(shot_idx, 'depth', ext='png'), depth)
+    cv2.imwrite(session.path(shot_idx, 'depth_colormap'), depth_vis)
     if ir is not None:
-        cv2.imwrite(str(ir_dir / f'{stem}_ir.jpg'), ir)
+        cv2.imwrite(session.path(shot_idx, 'ir'), ir)
 
     elapsed_min = (time.time() - start) / 60
     now_str     = datetime.now().isoformat(timespec='seconds')
@@ -195,7 +178,7 @@ def _do_capture(shot_idx: int, start: float) -> bool:
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 2)
         avg_depth_m = float(np.mean(depths_m)) if depths_m else 0.0
 
-        cv2.imwrite(str(annotated_dir / f'{stem}_annotated.jpg'), annotated)
+        cv2.imwrite(session.path(shot_idx, 'annotated'), annotated)
 
         with open(log_path, 'a', newline='') as f:
             csv.writer(f).writerow(
@@ -208,10 +191,11 @@ def _do_capture(shot_idx: int, start: float) -> bool:
     return True
 
 
+shot_count = 0
+save_count = 0
+
 try:
     start_time = time.time()
-    shot_count = 0
-    save_count = 0
     next_time  = start_time
 
     while True:
@@ -234,6 +218,18 @@ try:
             cam.scGetFrameReady(c_uint16(100))
 
 finally:
+    session.write_metadata(
+        camera={'model': 'NYX660',
+                'resolution': [_cfg['camera'].get('color_width'), _cfg['camera'].get('color_height')],
+                'fps': _cfg['camera'].get('fps'),
+                'params_json': _cfg['camera'].get('params_json')},
+        modalities=_mods,
+        shot_count=save_count,
+        timelapse={'interval_sec': INTERVAL, 'duration_hour': _args.duration,
+                   'planned_shots': TOTAL_SHOTS, 'attempted': shot_count},
+        detect={'enabled': bool(_args.detect), 'model': _model_path if _args.detect else None,
+                'conf': CONF} if _args.detect else None,
+    )
     close_camera(cam)
     gc.collect()
     print(f"\n完了。試行 {shot_count} 枚 / 保存成功 {save_count} 枚。ログ: {log_path or 'なし'}")
