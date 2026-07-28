@@ -89,8 +89,8 @@ sdk_path: ../../ScepterSDK
 camera:
   fps: 30
   depth_alpha: 0.4   # depth colormap の倍率（大きいほど近距離で飽和）
-  color_width: 1600  # color 解像度（1600x1200 / 800x600 / 640x480 など）
-  color_height: 1200
+  color_width: 1600   # color 解像度（このカメラは640x480/1600x1200の2モードのみ対応。1280x960等は不可）
+  color_height: 1200  # 将来のRGB-D融合を見据え depth(640x480) より高解像度で撮影する方針
 
 output:
   images_dir: ../data/images
@@ -374,7 +374,7 @@ python3 tools/rename_legacy.py data/click_test_data/250911_testdata_click --cam 
 | 深度解像度 | 640×480 @最大30fps |
 | 深度範囲 | 0.3〜4.5m |
 | 深度フォーマット | 16bit（mm単位） |
-| RGB 解像度 | 1600×1200（変更可） |
+| RGB 解像度 | 1600×1200（デフォルト。このカメラは640×480とのみ2モード対応、1280×960等は不可） |
 | IR | 1ch（640×480） |
 | 接続 | GigE（PoE+） |
 

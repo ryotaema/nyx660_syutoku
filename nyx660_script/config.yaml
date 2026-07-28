@@ -12,6 +12,14 @@ camera:
   # （CLI --fps / --color-size でも上書き可）。
   params_json: camera_params/NYX660_2026_07_07_14_45_38_0359.json
   depth_alpha: 0.4   # depth colormap 倍率（調整して使用）
+  # 将来のRGB-D融合（depth completion / guided upsampling系）を見据え、
+  # depth(640x480)より高解像度のRGBを撮影しておく方針（2026-07-28決定）。
+  # params_jsonのColorResolutionは640*480だが、ここで明示上書きする。
+  # 実機確認済み（2026-07-28）: このカメラのColorセンサーは640x480と1600x1200の
+  # 2つの固定モードしか受け付けない（1280x960はscSetColorResolutionがret=-15で拒否）。
+  # 詳細は ../log_nyx/2026-07-28.md 参照。
+  color_width: 1600
+  color_height: 1200
 
 output:
   images_dir: ../data/images        # config.yaml からの相対パス

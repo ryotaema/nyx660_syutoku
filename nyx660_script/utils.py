@@ -300,7 +300,7 @@ def _apply_exposure_and_filter_params(cam, params):
         _check("scSetSpatialFilterEnabled", cam.scSetSpatialFilterEnabled(c_bool(bool(filt['SpatialFilter']))))
 
 
-def _print_applied_params(cam, params):
+def _print_applied_params(cam, params, color_w=None, color_h=None):
     """JSONの期待値と実機の読み戻し値を並べて表示する（ズレを一目で確認するため）。"""
     from API.ScepterDS_enums import ScSensorType, ScExposureControlMode, ScWorkMode
 
@@ -341,9 +341,13 @@ def _print_applied_params(cam, params):
     _, xform_d2c    = cam.scGetTransformDepthImgToColorSensorEnabled()
     _, xform_c2d    = cam.scGetTransformColorImgToDepthSensorEnabled()
 
+    # Color解像度はconfig.yamlで意図的にJSONの値から上書きしているため、
+    # JSONの値ではなくconfig.yamlの要求値と比較する（他はJSON準拠のOK/!!判定）
+    color_expected = f"{color_w}*{color_h}" if color_w and color_h else control.get('ColorResolution')
+
     rows = [
         ("ToF解像度",              control.get('ToFResolution'),          f"{tw}*{th}"),
-        ("Color解像度",            control.get('ColorResolution'),        f"{cw}*{ch}"),
+        ("Color解像度(config.yaml基準)", color_expected,                  f"{cw}*{ch}"),
         ("FPS",                    control.get('FrameRate'),              fps),
         ("WorkMode",               control.get('WorkMode'),               _workmode_name(work_mode)),
         ("ToF露光mode",            exposure.get('ToF_ExposureMode'),      _mode_name(tof_mode)),
@@ -426,8 +430,11 @@ def open_camera(cfg):
 
     color_w = int(cfg['camera'].get('color_width', 640))
     color_h = int(cfg['camera'].get('color_height', 480))
-    cam.scSetColorResolution(c_int32(color_w), c_int32(color_h))
-    print(f"color解像度: {color_w}×{color_h}  FPS: {fps}")
+    ret = cam.scSetColorResolution(c_int32(color_w), c_int32(color_h))
+    if ret != 0:
+        print(f"警告: scSetColorResolution({color_w}x{color_h}) failed: {ret}"
+              "（このカメラ未対応の解像度の可能性。実機は別の値のまま動作しています）")
+    print(f"color解像度（要求値）: {color_w}×{color_h}  FPS: {fps}")
 
     # アクティブモードを明示設定（ScepterGUIToolがトリガーモードで終了した場合の対処）
     ret = cam.scSetWorkMode(ScWorkMode.SC_ACTIVE_MODE)
@@ -450,7 +457,7 @@ def open_camera(cfg):
         _apply_exposure_and_filter_params(cam, params)
         print(f"カメラパラメータ適用（個別API・{params_path}）")
 
-    _print_applied_params(cam, params)
+    _print_applied_params(cam, params, color_w=color_w, color_h=color_h)
 
     return cam
 
