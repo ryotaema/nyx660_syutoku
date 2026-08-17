@@ -469,6 +469,39 @@ def close_camera(cam):
     cam.scCloseDevice()
 
 
+def save_intrinsics(cam, save_dir):
+    """ToF/Colorセンサーの内部・外部パラメータを <save_dir>/intrinsics.json として保存する。"""
+    from API.ScepterDS_enums import ScSensorType
+
+    _, tof_intr = cam.scGetSensorIntrinsicParameters(ScSensorType.SC_TOF_SENSOR)
+    _, col_intr = cam.scGetSensorIntrinsicParameters(ScSensorType.SC_COLOR_SENSOR)
+    _, extr     = cam.scGetSensorExtrinsicParameters()
+
+    intrinsics_data = {
+        'tof': {
+            'fx': tof_intr.fx, 'fy': tof_intr.fy,
+            'cx': tof_intr.cx, 'cy': tof_intr.cy,
+            'k1': tof_intr.k1, 'k2': tof_intr.k2,
+            'p1': tof_intr.p1, 'p2': tof_intr.p2,
+            'k3': tof_intr.k3, 'k4': tof_intr.k4,
+            'k5': tof_intr.k5, 'k6': tof_intr.k6,
+        },
+        'color': {
+            'fx': col_intr.fx, 'fy': col_intr.fy,
+            'cx': col_intr.cx, 'cy': col_intr.cy,
+            'k1': col_intr.k1, 'k2': col_intr.k2,
+            'p1': col_intr.p1, 'p2': col_intr.p2,
+            'k3': col_intr.k3,
+        },
+        'extrinsics': {
+            'rotation':    list(extr.rotation),
+            'translation': list(extr.translation),
+        },
+    }
+    with open(os.path.join(save_dir, 'intrinsics.json'), 'w') as f:
+        json.dump(intrinsics_data, f, indent=2)
+
+
 def extract_depth(frame):
     """ScFrame → uint16 numpy 配列 (mm単位)"""
     raw = np.ctypeslib.as_array(frame.pFrameData, (frame.width * frame.height * 2,))

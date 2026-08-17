@@ -1,14 +1,12 @@
 import sys
-import os
 import gc
-import json
 import numpy as np
 import cv2
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import load_config, build_parser, apply_args, init_sdk, open_camera, close_camera
-from utils import extract_depth, extract_color, make_depth_colormap, save_ply, Session
+from utils import extract_depth, extract_color, make_depth_colormap, save_ply, save_intrinsics, Session
 
 _parser = build_parser()
 _parser.add_argument('--frames', type=int, default=None, metavar='N',
@@ -25,7 +23,7 @@ _args = _parser.parse_args()
 _cfg  = apply_args(load_config(), _args)
 init_sdk(_cfg)
 
-from API.ScepterDS_enums import ScFrameType, ScSensorType
+from API.ScepterDS_enums import ScFrameType
 from ctypes import c_uint16
 
 mode           = _args.mode
@@ -59,33 +57,7 @@ if align:
         print(f"警告: scSetTransformColorImgToDepthSensorEnabled failed: {ret}")
 
 # --- 内部パラメータ保存 ---
-ret, tof_intr  = cam.scGetSensorIntrinsicParameters(ScSensorType.SC_TOF_SENSOR)
-ret2, col_intr = cam.scGetSensorIntrinsicParameters(ScSensorType.SC_COLOR_SENSOR)
-ret3, extr     = cam.scGetSensorExtrinsicParameters()
-
-intrinsics_data = {
-    'tof': {
-        'fx': tof_intr.fx, 'fy': tof_intr.fy,
-        'cx': tof_intr.cx, 'cy': tof_intr.cy,
-        'k1': tof_intr.k1, 'k2': tof_intr.k2,
-        'p1': tof_intr.p1, 'p2': tof_intr.p2,
-        'k3': tof_intr.k3, 'k4': tof_intr.k4,
-        'k5': tof_intr.k5, 'k6': tof_intr.k6,
-    },
-    'color': {
-        'fx': col_intr.fx, 'fy': col_intr.fy,
-        'cx': col_intr.cx, 'cy': col_intr.cy,
-        'k1': col_intr.k1, 'k2': col_intr.k2,
-        'p1': col_intr.p1, 'p2': col_intr.p2,
-        'k3': col_intr.k3,
-    },
-    'extrinsics': {
-        'rotation':    list(extr.rotation),
-        'translation': list(extr.translation),
-    },
-}
-with open(os.path.join(save_dir, 'intrinsics.json'), 'w') as f:
-    json.dump(intrinsics_data, f, indent=2)
+save_intrinsics(cam, save_dir)
 
 # --- メタデータ初期化 ---
 _frames_meta = []
@@ -195,7 +167,7 @@ try:
             if preview is not None:
                 cv2.putText(preview, f"[s] Save ({frame_count} saved)  [q] Quit",
                             (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                    cv2.imshow('NYX660_pointcloud', cv2.resize(preview, (800, 600)))
+                cv2.imshow('NYX660_pointcloud', cv2.resize(preview, (800, 600)))
             key = cv2.waitKey(1) & 0xFF
             if key == ord('s'):
                 if save_frame(frame_count + 1, cam):

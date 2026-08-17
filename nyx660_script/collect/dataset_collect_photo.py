@@ -6,7 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import load_config, build_parser, apply_args, init_sdk, open_camera, close_camera
-from utils import extract_depth, extract_color, extract_ir, make_depth_colormap, Session
+from utils import extract_depth, extract_color, extract_ir, make_depth_colormap, save_intrinsics, Session
 
 _args = build_parser().parse_args()
 _cfg  = apply_args(load_config(), _args)
@@ -29,7 +29,10 @@ except RuntimeError as e:
     print(f"エラー: {e}")
     sys.exit(1)
 
+save_intrinsics(cam, str(session.dir))
+
 shot_count = 0
+_frames_meta = []
 
 try:
     print("\n[s] で1枚保存  [q] で終了\n")
@@ -40,14 +43,17 @@ try:
             continue
 
         color = depth = ir = None
+        color_ts = depth_ts = None
         if frameready.color:
             ret, cf = cam.scGetFrame(ScFrameType.SC_COLOR_FRAME)
             if ret == 0:
-                color = extract_color(cf)
+                color    = extract_color(cf)
+                color_ts = int(cf.hardwaretimestamp)
         if frameready.depth:
             ret, df = cam.scGetFrame(ScFrameType.SC_DEPTH_FRAME)
             if ret == 0:
-                depth = extract_depth(df)
+                depth    = extract_depth(df)
+                depth_ts = int(df.hardwaretimestamp)
         if frameready.ir:
             ret, irf = cam.scGetFrame(ScFrameType.SC_IR_FRAME)
             if ret == 0:
@@ -77,6 +83,12 @@ try:
             if ir is not None:
                 cv2.imwrite(session.path(shot_count, 'ir'), ir)
 
+            _frames_meta.append({
+                'index': shot_count,
+                'color_hardwaretimestamp': color_ts,
+                'depth_hardwaretimestamp': depth_ts,
+            })
+
             print(f"[{shot_count}枚目保存] {session.name(shot_count, 'color')}")
 
         elif key == ord('q'):
@@ -91,6 +103,7 @@ finally:
                 'params_json': _cfg['camera'].get('params_json')},
         modalities=_mods,
         shot_count=shot_count,
+        frames=_frames_meta,
     )
     close_camera(cam)
     cv2.destroyAllWindows()
