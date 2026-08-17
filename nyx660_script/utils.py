@@ -131,6 +131,8 @@ MOD_CODES = {
     'points':         'pt',     # クリック座標などのテキスト
     'detected':       'det',    # YOLO描画済み
     'annotated':      'det',
+    'depth_crop':      'dcrop',  # BBoxで切り出したdepth（crop/fruit_crop_extract.py）
+    'pointcloud_crop': 'pccrop', # BBoxで切り出した点群（crop/fruit_crop_extract.py）
 }
 
 
@@ -525,3 +527,148 @@ def save_ply(path, pointlist, count):
         f.write(header.encode('ascii'))
         for x, y, z in valid:
             f.write(struct.pack('<fff', x, y, z))
+
+
+def write_ply_points(path, points_xyz):
+    """(N,3) float配列をバイナリPLYとして保存する（NaN行は除外）。"""
+    pts = np.asarray(points_xyz, dtype=np.float64).reshape(-1, 3)
+    pts = pts[~np.isnan(pts).any(axis=1)]
+    with open(path, 'wb') as f:
+        header = (
+            "ply\n"
+            "format binary_little_endian 1.0\n"
+            f"element vertex {len(pts)}\n"
+            "property float x\n"
+            "property float y\n"
+            "property float z\n"
+            "end_header\n"
+        )
+        f.write(header.encode('ascii'))
+        f.write(pts.astype('<f4').tobytes())
+
+
+# ============================================================================
+# BBoxクロップ（crop/bbox_annotate.py, crop/fruit_crop_extract.py で使用）
+#
+# dataset_point_collect.py の出力は、color(既定1600x1200・raw) と
+# depth/pointcloud(640x480) が別解像度・別座標系のまま保存される
+# （CLAUDE.md記載の通りアラインは撮影時にかけない方針がデフォルト）。
+# そのため colorに描いたBBoxからdepth/pointcloudを切り出すには2通りある:
+#
+#  1) 撮影時アライン（dataset_point_collect.py --align）:
+#     scSetTransformColorImgToDepthSensorEnabled で color を depth と同じ
+#     640x480ピクセルグリッドに変換してから保存するため、BBoxはそのまま
+#     depth画素座標として使える（bbox_mask_direct）。
+#  2) 撮影後クロップ（未アラインセッション、fruit_crop_extract.py既定）:
+#     intrinsics.json の内部・外部パラメータで depth点群をcolor画像へ射影し、
+#     BBox内に収まるdepth画素を逆算する（bbox_mask_via_projection）。
+#     scGetSensorExtrinsicParameters の rotation/translation が
+#     「ToF→Color」なのか「Color→ToF」なのかはPython公式サンプルに
+#     手動射影の例がなく未検証。fruit_crop_extract.py --debug-overlay で
+#     射影結果をcolor画像に重ねて可視化し、目視でズレを確認すること。
+#     ズレていた場合は --extrinsics-mode color2tof を試す。
+# ============================================================================
+
+def backproject_depth(depth, tof_intr):
+    """depth(mm, HxW uint16/float) -> (H,W,3) 3D点（ToFセンサー座標系, mm）。
+
+    無効画素（depth<=0）は NaN。歪み補正はしていない簡易ピンホールモデル
+    （クロップ用途の位置精度としては十分だが、精密な点群生成には
+    scConvertDepthFrameToPointCloudVector の結果を使うこと）。
+    """
+    h, w = depth.shape
+    fx, fy, cx, cy = tof_intr['fx'], tof_intr['fy'], tof_intr['cx'], tof_intr['cy']
+    ys, xs = np.mgrid[0:h, 0:w]
+    z = depth.astype(np.float64)
+    x = (xs - cx) * z / fx
+    y = (ys - cy) * z / fy
+    pts = np.stack([x, y, z], axis=-1)
+    pts[depth <= 0] = np.nan
+    return pts
+
+
+def project_to_color(points, extrinsics, color_intr, mode='tof2color'):
+    """ToF座標系の3D点(...,3) をColorセンサー画像へ射影し(...,2)の(u,v)を返す。
+
+    mode='tof2color': rotation/translationを「ToF→Color」として使用（既定）。
+    mode='color2tof' : 向きが逆だった場合用に R^T, -R^T@T へ変換して使用。
+    """
+    shape = points.shape[:-1]
+    pts = points.reshape(-1, 3)
+    valid = ~np.isnan(pts).any(axis=1)
+
+    R = np.array(extrinsics['rotation'], dtype=np.float64).reshape(3, 3)
+    T = np.array(extrinsics['translation'], dtype=np.float64).reshape(3, 1)
+    if mode == 'color2tof':
+        R = R.T
+        T = -R @ T
+
+    K = np.array([[color_intr['fx'], 0, color_intr['cx']],
+                  [0, color_intr['fy'], color_intr['cy']],
+                  [0, 0, 1]], dtype=np.float64)
+    dist_keys = ['k1', 'k2', 'p1', 'p2', 'k3']
+    dist = np.array([color_intr.get(k, 0.0) for k in dist_keys], dtype=np.float64)
+
+    uv = np.full((pts.shape[0], 2), np.nan)
+    if valid.any():
+        rvec, _ = cv2.Rodrigues(R)
+        proj, _ = cv2.projectPoints(pts[valid].astype(np.float64), rvec, T, K, dist)
+        uv[valid] = proj.reshape(-1, 2)
+    return uv.reshape(*shape, 2)
+
+
+def bbox_mask_direct(depth, bbox):
+    """アライン済み（color==depth座標系）セッション用: BBoxをそのままdepth画素矩形として使う。"""
+    x1, y1, x2, y2 = [int(round(v)) for v in bbox]
+    h, w = depth.shape
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(w, x2), min(h, y2)
+    mask = np.zeros(depth.shape, dtype=bool)
+    if x2 > x1 and y2 > y1:
+        mask[y1:y2, x1:x2] = depth[y1:y2, x1:x2] > 0
+    return mask
+
+
+def bbox_mask_via_projection(depth, tof_intr, color_intr, extrinsics, bbox, mode='tof2color'):
+    """未アラインセッション用: depth点群をcolor画像へ射影し、BBox内に入る画素のマスクを返す。"""
+    x1, y1, x2, y2 = bbox
+    pts = backproject_depth(depth, tof_intr)
+    uv = project_to_color(pts, extrinsics, color_intr, mode=mode)
+    u, v = uv[..., 0], uv[..., 1]
+    with np.errstate(invalid='ignore'):
+        mask = (depth > 0) & (u >= x1) & (u <= x2) & (v >= y1) & (v <= y2)
+    return mask
+
+
+def crop_depth_by_mask(depth, mask):
+    """マスクの外接矩形でdepthを切り出す（矩形外は0埋め）。マスクが空ならNoneを返す。"""
+    ys, xs = np.where(mask)
+    if len(xs) == 0:
+        return None, None
+    x1, y1, x2, y2 = int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+    cropped = np.where(mask, depth, 0)[y1:y2, x1:x2]
+    return cropped, (x1, y1, x2, y2)
+
+
+def load_yolo_boxes(txt_path, img_w, img_h):
+    """YOLO形式ラベル(class xc yc w h; 正規化)を画素座標のBBoxリストに変換する。
+
+    戻り値: [(class_id, x1, y1, x2, y2), ...]（座標はラベル対象画像の画素系）
+    """
+    boxes = []
+    if not os.path.exists(txt_path):
+        return boxes
+    with open(txt_path) as f:
+        for line in f:
+            parts = line.strip().split()
+            if len(parts) != 5:
+                continue
+            cls, xc, yc, bw, bh = parts
+            cls = int(float(cls))
+            xc, yc, bw, bh = float(xc), float(yc), float(bw), float(bh)
+            x1 = (xc - bw / 2) * img_w
+            y1 = (yc - bh / 2) * img_h
+            x2 = (xc + bw / 2) * img_w
+            y2 = (yc + bh / 2) * img_h
+            boxes.append((cls, x1, y1, x2, y2))
+    return boxes

@@ -15,6 +15,12 @@ _parser.add_argument('--frames', type=int, default=None, metavar='N',
                      help='auto モードのフレーム数（config.yaml の値を上書き）')
 _parser.add_argument('--mode', choices=['auto', 'manual'], default='auto',
                      help='auto: N フレーム自動取得 | manual: [s] キーで1枚ずつ取得')
+_parser.add_argument('--align', action='store_true',
+                     help='color を scSetTransformColorImgToDepthSensorEnabled で'
+                          ' depth座標系(640x480)にアラインして保存する'
+                          '（既定はraw、CLAUDE.md記載の撮影方針どおり）。'
+                          ' BBoxクロップ（crop/fruit_crop_extract.py）を'
+                          ' 射影計算なしで直接ピクセル切り出しできるようにするためのオプション')
 _args = _parser.parse_args()
 _cfg  = apply_args(load_config(), _args)
 init_sdk(_cfg)
@@ -23,6 +29,7 @@ from API.ScepterDS_enums import ScFrameType, ScSensorType
 from ctypes import c_uint16
 
 mode           = _args.mode
+align          = _args.align
 capture_frames = _args.frames if _args.frames is not None else _cfg['pointcloud']['capture_frames']
 _depth_alpha   = _cfg['camera'].get('depth_alpha', 0.4)
 
@@ -35,6 +42,7 @@ save_dir = str(session.dir)
 mode_label = f"auto ({capture_frames} frames)" if mode == 'auto' else "manual"
 print(f"保存先: {save_dir}")
 print(f"モード: {mode_label}")
+print(f"アライン: {'ON（colorをdepth座標系640x480に変換）' if align else 'OFF（raw、既定）'}")
 
 # --- カメラ初期化 ---
 try:
@@ -42,6 +50,13 @@ try:
 except RuntimeError as e:
     print(f"エラー: {e}")
     sys.exit(1)
+
+if align:
+    # open_camera() がStartStream直後に両Transformを常時Falseへ戻しているため、
+    # ここで明示的に有効化する（scStartStream後でないと反映されないAPI）。
+    ret = cam.scSetTransformColorImgToDepthSensorEnabled(True)
+    if ret != 0:
+        print(f"警告: scSetTransformColorImgToDepthSensorEnabled failed: {ret}")
 
 # --- 内部パラメータ保存 ---
 ret, tof_intr  = cam.scGetSensorIntrinsicParameters(ScSensorType.SC_TOF_SENSOR)
@@ -82,7 +97,12 @@ def save_frame(idx, cam):
         return False
 
     color = depth = None
-    if frameready.color:
+    if align:
+        if frameready.transformedColor:
+            ret, cf = cam.scGetFrame(ScFrameType.SC_TRANSFORM_COLOR_IMG_TO_DEPTH_SENSOR_FRAME)
+            if ret == 0:
+                color = extract_color(cf)
+    elif frameready.color:
         ret, cf = cam.scGetFrame(ScFrameType.SC_COLOR_FRAME)
         if ret == 0:
             color = extract_color(cf)
@@ -107,16 +127,32 @@ def save_frame(idx, cam):
     return True
 
 
+def get_preview_color(cam, frameready):
+    if align:
+        if frameready.transformedColor:
+            ret, cf = cam.scGetFrame(ScFrameType.SC_TRANSFORM_COLOR_IMG_TO_DEPTH_SENSOR_FRAME)
+            if ret == 0:
+                return extract_color(cf)
+    elif frameready.color:
+        ret, cf = cam.scGetFrame(ScFrameType.SC_COLOR_FRAME)
+        if ret == 0:
+            return extract_color(cf)
+    return None
+
+
 def write_metadata(actual_frames):
+    color_resolution = ([640, 480] if align else
+                         [_cfg['camera'].get('color_width'), _cfg['camera'].get('color_height')])
     session.write_metadata(
         camera={'model': 'NYX660',
-                'resolution': [_cfg['camera'].get('color_width'), _cfg['camera'].get('color_height')],
+                'resolution': color_resolution,
                 'fps': _cfg['camera'].get('fps', 30),
                 'params_json': _cfg['camera'].get('params_json')},
         mode=mode,
         capture_frames=capture_frames if mode == 'auto' else None,
         actual_frames=actual_frames,
         frames=_frames_meta,
+        color_aligned_to_depth=align,
     )
 
 
@@ -129,13 +165,11 @@ try:
             ret, frameready = cam.scGetFrameReady(c_uint16(1200))
             if ret != 0:
                 continue
-            if frameready.color:
-                ret, cf = cam.scGetFrame(ScFrameType.SC_COLOR_FRAME)
-                if ret == 0:
-                    preview = extract_color(cf)
-                    cv2.putText(preview, "[Enter] Start  [q] Quit",
-                                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                    cv2.imshow('NYX660_pointcloud', cv2.resize(preview, (800, 600)))
+            preview = get_preview_color(cam, frameready)
+            if preview is not None:
+                cv2.putText(preview, "[Enter] Start  [q] Quit",
+                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                cv2.imshow('NYX660_pointcloud', cv2.resize(preview, (800, 600)))
             key = cv2.waitKey(1) & 0xFF
             if key == 13:
                 cv2.destroyAllWindows()
@@ -157,12 +191,10 @@ try:
             ret, frameready = cam.scGetFrameReady(c_uint16(1200))
             if ret != 0:
                 continue
-            if frameready.color:
-                ret, cf = cam.scGetFrame(ScFrameType.SC_COLOR_FRAME)
-                if ret == 0:
-                    preview = extract_color(cf)
-                    cv2.putText(preview, f"[s] Save ({frame_count} saved)  [q] Quit",
-                                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            preview = get_preview_color(cam, frameready)
+            if preview is not None:
+                cv2.putText(preview, f"[s] Save ({frame_count} saved)  [q] Quit",
+                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
                     cv2.imshow('NYX660_pointcloud', cv2.resize(preview, (800, 600)))
             key = cv2.waitKey(1) & 0xFF
             if key == ord('s'):
