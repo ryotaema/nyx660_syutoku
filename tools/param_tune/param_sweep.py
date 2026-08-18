@@ -43,6 +43,10 @@ detect_eval.py でYOLO検出結果を集計し、どの値・どの組み合わ�
     # Color自動露光の上限を振る（color_exposure/color_gainと違いAutoモードのまま使う）
     python3 tools/param_tune/param_sweep.py --param color_aec_max_exposure_time --values 20000,50000,100000
 
+    # HDR/WDRのON/OFFを比較する（各フレームの露光時間はSDK既定・直前設定のまま）
+    python3 tools/param_tune/param_sweep.py --param hdr_mode --values 0,1
+    python3 tools/param_tune/param_sweep.py --param wdr_mode --values 0,1
+
     # param_sweep_gui.py で作成した設定ファイルから実行
     python3 tools/param_tune/param_sweep.py --config configs/20260818_153000_tof_exposure.json
 
@@ -328,6 +332,18 @@ def main():
     def _get_ir_gmm_correction_threshold(cam):
         return cam.scGetIRGMMCorrection()[1].threshold
 
+    def _set_hdr_mode(cam, value):
+        _check("scSetHDRModeEnabled", cam.scSetHDRModeEnabled(c_bool(value)))
+
+    def _get_hdr_mode(cam):
+        return cam.scGetHDRModeEnabled()[1]
+
+    def _set_wdr_mode(cam, value):
+        _check("scSetWDRModeEnabled", cam.scSetWDRModeEnabled(c_bool(value)))
+
+    def _get_wdr_mode(cam):
+        return cam.scGetWDRModeEnabled()[1]
+
     _setters = {
         'tof_exposure': _set_tof_exposure,
         'color_exposure': _set_color_exposure,
@@ -340,6 +356,8 @@ def main():
         'fillhole_filter': _set_fillhole_filter,
         'ir_gmm_gain': _set_ir_gmm_gain,
         'ir_gmm_correction_threshold': _set_ir_gmm_correction_threshold,
+        'hdr_mode': _set_hdr_mode,
+        'wdr_mode': _set_wdr_mode,
     }
     _getters = {
         'tof_exposure': _get_tof_exposure,
@@ -353,6 +371,8 @@ def main():
         'fillhole_filter': _get_fillhole_filter,
         'ir_gmm_gain': _get_ir_gmm_gain,
         'ir_gmm_correction_threshold': _get_ir_gmm_correction_threshold,
+        'hdr_mode': _get_hdr_mode,
+        'wdr_mode': _get_wdr_mode,
     }
     param_specs = {name: {**meta, 'setter': _setters[name], 'getter': _getters[name]}
                    for name, meta in PARAM_META.items()}

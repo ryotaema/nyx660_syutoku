@@ -5,9 +5,10 @@
 PARAM_META がスイープ可能なパラメータ名の単一の情報源。setter/getter（SDK個別API呼び出し）は
 SDK初期化後でないと構築できないため param_sweep.py 側で組み立てる。
 
-このモジュールに無いがSDKに存在するもの（意図的に対象外。理由付きの一覧は
-param_sweep.py --list-all 参照）:
-  HDR/WDRモード・ExposureTimeOfHDR/WDR — フレーム構成自体が複数露光合成に変わるため
+このモジュールに無いがSDKに存在するもの（意図的に対象外）:
+  ExposureTimeOfHDR/WDR（HDR/WDRの各フレームごとの露光時間） — フレーム番号ごとに
+    値を持つ配列パラメータでスカラー値のスイープに馴染まないため。ON/OFF自体は
+    hdr_mode/wdr_modeとして対象に含めている（既定/直前設定の露光時間のまま使う）
   ColorAECROI — 値が4つ組でスカラー値のスイープに馴染まないため
   ColorResolution/ToFResolution — 解像度が変わると出力の形が変わり比較にならないため
     （config.yaml/--color-size で別途設定する運用のまま）
@@ -90,6 +91,18 @@ PARAM_META = {
         'label': 'IR GMM補正閾値', 'unit': '', 'type': 'int',
         'json_section': 'Control', 'json_key': 'IRGmmCorrectionThreshold',
         'hint': 'SDKに数値範囲の記載なし / プロファイル既定:50',
+    },
+    'hdr_mode': {
+        'label': 'HDRモード（複数露光合成, 0=OFF/1=ON）', 'unit': '', 'type': 'bool',
+        'json_section': 'ExposureTime', 'json_key': 'HDR_Mode',
+        'hint': '0=OFF/1=ONのみ / 各フレームの露光時間(ExposureTimeOfHDR)は本ツール未対応のため'
+                'SDK既定・直前の設定のまま使われる / プロファイル既定:0(OFF)',
+    },
+    'wdr_mode': {
+        'label': 'WDRモード（複数露光合成, 0=OFF/1=ON）', 'unit': '', 'type': 'bool',
+        'json_section': 'ExposureTime', 'json_key': 'WDR_Mode',
+        'hint': '0=OFF/1=ONのみ / 各フレームの露光時間(ExposureTimeOfWDR)は本ツール未対応のため'
+                'SDK既定・直前の設定のまま使われる / プロファイル既定:0(OFF)',
     },
 }
 
