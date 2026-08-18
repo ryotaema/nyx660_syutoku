@@ -252,6 +252,26 @@ def montage_grid_for_combos(results, names, combine=None, combo_key='combo'):
     return None, None
 
 
+def with_reference_tile(ordered_results, grid_shape, ref_entry):
+    """Auto露光での参考撮影（ref_entry）をモンタージュの先頭に追加できるか判定し、
+    追加できれば ordered_results/grid_shape に組み込んで返す。
+
+    1行グリッド（パラメータ1個）または自動配置（grid_shape=None）の場合のみ、
+    先頭に1枠追加して差し込める。2次元グリッド（パラメータ2個・直積）は
+    行/列の意味が壊れるため追加しない（呼び出し側は別途 auto_reference/ フォルダを
+    案内すること）。
+
+    戻り値: (ordered_results, grid_shape, prepended: bool)
+    """
+    if ref_entry is None:
+        return ordered_results, grid_shape, False
+    if grid_shape is not None and grid_shape[0] != 1:
+        return ordered_results, grid_shape, False
+    new_ordered = [ref_entry] + list(ordered_results)
+    new_grid_shape = (grid_shape[0], grid_shape[1] + 1) if grid_shape is not None else None
+    return new_ordered, new_grid_shape, True
+
+
 def build_montage(tiles, out_path, title=None, grid_shape=None, thumb_width=None):
     """複数の画像を1枚のグリッド画像（コンタクトシート）にまとめて保存する。
 

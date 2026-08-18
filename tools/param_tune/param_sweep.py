@@ -46,6 +46,16 @@ detect_eval.py でYOLO検出結果を集計し、どの値・どの組み合わ�
     # param_sweep_gui.py で作成した設定ファイルから実行
     python3 tools/param_tune/param_sweep.py --config configs/20260818_153000_tof_exposure.json
 
+    # Auto参考撮影（既定でON）を省略する場合
+    python3 tools/param_tune/param_sweep.py --param tof_exposure --values 1000,3000,5000 --no-auto-reference
+
+Auto参考撮影について:
+    既定で、スイープ開始直前にToF・Color両方をAuto露光にして1枚だけ参考撮影する
+    （auto_reference/ フォルダに保存）。カメラが自動調整で選ぶ露光値を基準として
+    手動で振った値と見比べるための参考データで、撮影は1回のみ（スイープはしない）。
+    撮影後は元のexposure control mode/露光時間に戻してからスイープ本体を開始する。
+    --no-auto-reference で無効化できる。
+
 GUIでの設定:
     python3 tools/param_tune/param_sweep_gui.py
     振るパラメータ（複数追加可）・値の範囲・組み合わせ方（直積/対応）・
@@ -56,8 +66,12 @@ GUIでの設定:
     output.param_tune_dir（既定 ../data/param_tune）/<YYMMDD>/<prefix>_<param1+param2...>[_<tag>]/
         intrinsics.json
         metadata.json                    # パラメータ名・要求値/実機読み戻し値・基準値の一覧
-        comparison_color.png             # 全組み合わせのcolorを1枚に並べた比較画像
+        comparison_color.png             # 全組み合わせ（+Auto参考撮影）のcolorを1枚に並べた比較画像
         comparison_depth_colormap.png    # 同上、depth_colormap版
+        auto_reference/                  # ToF・Color両方Auto露光での参考撮影（1枚のみ、既定でON）
+            auto_reference_color.png
+            auto_reference_depth.png
+            auto_reference_depth_colormap.png
         <param1>-<値1>_<param2>-<値2>/                      # 組み合わせごとのフォルダ
             <param1>-<値1>_<param2>-<値2>_color.png          # ファイル名にも組み合わせを埋め込む
             <param1>-<値1>_<param2>-<値2>_depth.png           # （フォルダ外にコピーしても判別できるように）
@@ -84,7 +98,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / 'nyx660_s
 
 from common import (
     PARAM_META, parse_values, cast_value, combo_dirname, combo_label,
-    result_filename, build_montage, montage_grid_for_combos,
+    result_filename, build_montage, montage_grid_for_combos, with_reference_tile,
 )
 from utils import (
     load_config, build_parser, apply_args, init_sdk, open_camera, close_camera,
@@ -115,6 +129,10 @@ def _build_arg_parser():
                     help='値ごとに点群(.ply)も保存する（既定はcolor/depthのみ）')
     p.add_argument('--pause', type=float, default=None, metavar='SEC',
                     help='autoモードで撮影後に結果を表示しておく秒数（既定: 0.3）')
+    p.add_argument('--auto-reference', dest='auto_reference', action='store_true', default=None,
+                    help='ToF/Color両方をAuto露光にした参考撮影を最初に1回だけ追加する（既定: ON）')
+    p.add_argument('--no-auto-reference', dest='auto_reference', action='store_false',
+                    help='Auto露光の参考撮影を行わない')
     p.add_argument('--list', action='store_true',
                     help='調整可能なパラメータの一覧を表示して終了する')
     return p
@@ -197,6 +215,7 @@ def main():
     warmup_frames  = args.warmup_frames if args.warmup_frames is not None else int(file_cfg.get('warmup_frames', 10))
     pause          = args.pause if args.pause is not None else float(file_cfg.get('pause', 0.3))
     pointcloud     = args.pointcloud or bool(file_cfg.get('pointcloud', False))
+    auto_reference = args.auto_reference if args.auto_reference is not None else bool(file_cfg.get('auto_reference', True))
     user_tag       = args.tag or file_cfg.get('tag')
     baseline_overrides = file_cfg.get('baseline_overrides') or {}
 
@@ -351,7 +370,8 @@ def main():
     print(f"保存先: {session.dir}")
     print(f"パラメータ: {[(n, param_specs[n]['label']) for n in names]}")
     print(f"組み合わせ数: {len(combos)}（combine={combine}）")
-    print(f"モード: {mode}  warmup: {warmup_frames}フレーム  点群: {'ON' if pointcloud else 'OFF'}")
+    print(f"モード: {mode}  warmup: {warmup_frames}フレーム  点群: {'ON' if pointcloud else 'OFF'}"
+          f"  Auto参考撮影: {'ON' if auto_reference else 'OFF'}")
     if baseline_overrides:
         print(f"基準値の上書き: {baseline_overrides}")
 
@@ -404,10 +424,66 @@ def main():
                 save_ply(str(vdir / result_filename(tag, 'pointcloud', 'ply')), pointlist, df.width * df.height)
         return depth_cm
 
+    def capture_auto_reference():
+        """ToF・Color両方をAuto露光にして1枚だけ参考撮影する（比較の基準用）。
+        撮影後は変更前のexposure control mode/exposure timeに戻す
+        （このあとのスイープ本体に影響を与えないため）。
+        """
+        prev_tof_mode = cam.scGetExposureControlMode(ScSensorType.SC_TOF_SENSOR)[1]
+        prev_tof_exp = cam.scGetExposureTime(ScSensorType.SC_TOF_SENSOR)[1]
+        prev_color_mode = cam.scGetExposureControlMode(ScSensorType.SC_COLOR_SENSOR)[1]
+        prev_color_exp = cam.scGetExposureTime(ScSensorType.SC_COLOR_SENSOR)[1]
+
+        _check("scSetExposureControlMode(ToF->Auto)", cam.scSetExposureControlMode(
+            ScSensorType.SC_TOF_SENSOR, ScExposureControlMode.SC_EXPOSURE_CONTROL_MODE_AUTO))
+        _check("scSetExposureControlMode(Color->Auto)", cam.scSetExposureControlMode(
+            ScSensorType.SC_COLOR_SENSOR, ScExposureControlMode.SC_EXPOSURE_CONTROL_MODE_AUTO))
+
+        attempts = 0
+        warm = 0
+        while warm < warmup_frames and attempts < warmup_frames * 5:
+            if grab_frame() is not None:
+                warm += 1
+            attempts += 1
+
+        dirname = 'auto_reference'
+        vdir = session.dir / dirname
+        frame = grab_frame()
+        saved = frame is not None
+        actual = {
+            'tof_exposure': cam.scGetExposureTime(ScSensorType.SC_TOF_SENSOR)[1],
+            'color_exposure': cam.scGetExposureTime(ScSensorType.SC_COLOR_SENSOR)[1],
+        }
+        if saved:
+            color, depth, df = frame
+            save_capture(vdir, color, depth, df)
+            print(f"  Auto参考撮影: 実機 tof_exposure={actual['tof_exposure']}us "
+                  f"color_exposure={actual['color_exposure']}us  → {dirname}/")
+        else:
+            print("  警告: Auto参考撮影のフレーム取得に失敗しました")
+
+        # 元の状態に戻す（Manualだった場合は露光時間も戻す）
+        _check("scSetExposureControlMode(ToF restore)", cam.scSetExposureControlMode(
+            ScSensorType.SC_TOF_SENSOR, ScExposureControlMode(prev_tof_mode)))
+        if prev_tof_mode == ScExposureControlMode.SC_EXPOSURE_CONTROL_MODE_MANUAL.value:
+            _check("scSetExposureTime(ToF restore)",
+                   cam.scSetExposureTime(ScSensorType.SC_TOF_SENSOR, c_int32(prev_tof_exp)))
+        _check("scSetExposureControlMode(Color restore)", cam.scSetExposureControlMode(
+            ScSensorType.SC_COLOR_SENSOR, ScExposureControlMode(prev_color_mode)))
+        if prev_color_mode == ScExposureControlMode.SC_EXPOSURE_CONTROL_MODE_MANUAL.value:
+            _check("scSetExposureTime(Color restore)",
+                   cam.scSetExposureTime(ScSensorType.SC_COLOR_SENSOR, c_int32(prev_color_exp)))
+
+        return {'dirname': dirname, 'actual': actual, 'saved': saved}
+
     results = []
     aborted = False
+    auto_reference_result = None
 
     try:
+        if auto_reference:
+            auto_reference_result = capture_auto_reference()
+
         for combo in combos:
             combo_casted = {name: apply_param(cam, name, value) for name, value in combo.items()}
 
@@ -487,6 +563,7 @@ def main():
             pointcloud=pointcloud,
             baseline_overrides=baseline_overrides,
             config_file=args.config,
+            auto_reference=auto_reference_result,
             aborted=aborted,
             results=results,
         )
@@ -495,19 +572,27 @@ def main():
         n_saved = sum(1 for r in results if r['saved'])
         print(f"\n完了: {n_saved}/{len(combos)} 通りを保存 → {session.dir}")
         if n_saved > 0:
-            _build_comparison_images(session.dir, results, names, combine, unit_map)
+            _build_comparison_images(session.dir, results, names, combine, unit_map, auto_reference_result)
         print(f"検出集計は次のコマンドで実行できます:")
         print(f"  python3 {Path(__file__).parent / 'detect_eval.py'} {session.dir}")
         gc.collect()
 
 
-def _build_comparison_images(session_dir, results, names, combine, unit_map):
-    """全組み合わせのcolor/depth_colormapを1枚のコンタクトシート画像にまとめて保存する。"""
+def _build_comparison_images(session_dir, results, names, combine, unit_map, auto_reference_result=None):
+    """全組み合わせのcolor/depth_colormapを1枚のコンタクトシート画像にまとめて保存する。
+    Auto参考撮影があり、1行グリッド（パラメータ1個）または自動配置の場合は先頭に含める
+    （パラメータ2個の2次元グリッドには軸が壊れるため含めない。auto_reference/フォルダを案内する）。
+    """
     saved = [r for r in results if r['saved']]
     if not saved:
         return
     grid_shape, ordered = montage_grid_for_combos(saved, names, combine)
     ordered_results = ordered if ordered is not None else saved
+
+    ref_entry = None
+    if auto_reference_result and auto_reference_result.get('saved'):
+        ref_entry = {'dirname': auto_reference_result['dirname'], 'combo': {}, '_is_reference': True}
+    ordered_results, grid_shape, prepended = with_reference_tile(ordered_results, grid_shape, ref_entry)
 
     for modality in ('color', 'depth_colormap'):
         tiles = []
@@ -516,7 +601,7 @@ def _build_comparison_images(session_dir, results, names, combine, unit_map):
                 tiles.append((None, ''))
                 continue
             img_path = session_dir / r['dirname'] / result_filename(r['dirname'], modality, 'png')
-            label = combo_label(r['combo'], unit_map).replace(', ', '\n')
+            label = 'AUTO reference' if r.get('_is_reference') else combo_label(r['combo'], unit_map).replace(', ', '\n')
             tiles.append((str(img_path) if img_path.exists() else None, label))
 
         out_path = session_dir / f'comparison_{modality}.png'
@@ -524,6 +609,10 @@ def _build_comparison_images(session_dir, results, names, combine, unit_map):
         title = f"{modality} comparison - {', '.join(names)}"
         if build_montage(tiles, out_path, title=title, grid_shape=grid_shape):
             print(f"比較画像: {out_path}")
+
+    if ref_entry and not prepended:
+        print(f"参考: Auto露光の撮影データは auto_reference/ に保存されています"
+              f"（{len(names)}パラメータの比較グリッドには軸が合わないため含めていません）")
 
 
 if __name__ == '__main__':

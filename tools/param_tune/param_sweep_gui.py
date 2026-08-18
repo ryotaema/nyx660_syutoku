@@ -187,6 +187,11 @@ class ParamSweepGUI:
             .grid(row=row, column=1, sticky='w', pady=3)
         row += 1
 
+        self.auto_reference_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(form, text="Auto露光の参考撮影を含める（ToF/Color両方Auto、最初に1回のみ）",
+                         variable=self.auto_reference_var).grid(row=row, column=1, sticky='w', pady=3)
+        row += 1
+
         ttk.Label(form, text="タグ（保存フォルダ名に付加、任意）").grid(row=row, column=0, sticky='w', pady=3)
         self.tag_var = tk.StringVar()
         ttk.Entry(form, textvariable=self.tag_var, width=30).grid(row=row, column=1, sticky='w', pady=3)
@@ -424,6 +429,7 @@ class ParamSweepGUI:
             'warmup_frames': int(self.warmup_var.get()),
             'pause': float(self.pause_var.get()),
             'pointcloud': bool(self.pointcloud_var.get()),
+            'auto_reference': bool(self.auto_reference_var.get()),
             'tag': self.tag_var.get().strip() or None,
             'baseline_overrides': baseline_overrides,
             'generated_at': datetime.now().isoformat(timespec='seconds'),

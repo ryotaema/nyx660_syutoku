@@ -16,8 +16,10 @@
 出力（セッションディレクトリ直下）:
     <組み合わせ>/<組み合わせ>_detected.jpg  # BBox描画済み画像（旧命名のdetected.jpgにも対応）
     comparison_detected.png    # 全組み合わせのBBox描画済み画像を1枚に並べた比較画像
-                                # （検出数・平均信頼度もラベルに表示）
+                                # （検出数・平均信頼度もラベルに表示。Auto参考撮影があれば
+                                #   1行グリッド/自動配置の場合のみ先頭に含める）
     detection_summary.csv      # 組み合わせごとの検出数・平均/最大信頼度・検出クラス
+                                # （Auto参考撮影は含めない。結果は auto_reference/detection.json）
     detection_summary.png      # パラメータ1個: 値に対する折れ線グラフ
                                 # パラメータ2個(product): 値×値のヒートマップ
                                 # それ以外（3個以上 or zip）: 組み合わせごとの棒グラフ
@@ -28,6 +30,7 @@
 
 import sys
 import csv
+import json
 import argparse
 from pathlib import Path
 
@@ -36,7 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / 'nyx660_s
 
 from common import (
     safe_dirname, find_latest_session, combo_label,
-    result_filename, find_result_file, build_montage, montage_grid_for_combos,
+    result_filename, find_result_file, build_montage, montage_grid_for_combos, with_reference_tile,
 )
 from utils import load_config
 
@@ -52,7 +55,6 @@ except ImportError:
 
 
 def _load_metadata(session_dir):
-    import json
     meta_path = session_dir / 'metadata.json'
     if not meta_path.exists():
         print(f"エラー: metadata.json が見つかりません: {meta_path}")
@@ -180,6 +182,34 @@ def main():
         print("検出対象の画像がありませんでした。")
         sys.exit(1)
 
+    # --- Auto参考撮影（あれば）も同じモデルで検出しておく（ランキング/CSVには含めない） ---
+    ref_row = None
+    auto_ref = meta.get('auto_reference')
+    if auto_ref and auto_ref.get('saved'):
+        ref_dirname = auto_ref['dirname']
+        ref_vdir = session_dir / ref_dirname
+        ref_color_path = find_result_file(ref_vdir, ref_dirname, 'color', 'png')
+        if ref_color_path is None:
+            print(f"  警告: {ref_vdir} に color 画像が見つかりません（Auto参考撮影）。スキップします。")
+        else:
+            res = model(str(ref_color_path), conf=conf, verbose=False)[0]
+            boxes = res.boxes
+            n = len(boxes)
+            confs = boxes.conf.cpu().numpy() if n > 0 else []
+            avg_conf = float(sum(confs) / n) if n > 0 else 0.0
+            max_conf = float(max(confs)) if n > 0 else 0.0
+            classes = ','.join(sorted({res.names[int(c)] for c in boxes.cls.cpu().numpy()})) if n > 0 else ''
+            cv2.imwrite(str(ref_vdir / result_filename(ref_dirname, 'detected', 'jpg')), res.plot())
+
+            ref_row = {'_combo': {}, '_dirname': ref_dirname, 'n_detections': n,
+                       'avg_conf': avg_conf, 'max_conf': max_conf, 'classes': classes}
+            print(f"\n  [AUTO参考] 実機 tof_exposure={auto_ref['actual'].get('tof_exposure')}us "
+                  f"color_exposure={auto_ref['actual'].get('color_exposure')}us  検出:{n:2d}個  "
+                  f"avg_conf={avg_conf:.3f}  max_conf={max_conf:.3f}  [{classes}]")
+            with open(ref_vdir / 'detection.json', 'w') as f:
+                json.dump({**auto_ref, 'n_detections': n, 'avg_conf': avg_conf,
+                           'max_conf': max_conf, 'classes': classes}, f, indent=2, ensure_ascii=False)
+
     if len(names) == 1 and _is_numeric([r['_combo'][names[0]] for r in rows]):
         rows.sort(key=lambda r: r['_combo'][names[0]])
 
@@ -205,6 +235,8 @@ def main():
     # --- 検出結果の比較画像（BBox描画済み画像を1枚のコンタクトシートに） ---
     grid_shape, ordered = montage_grid_for_combos(rows, names, combine, combo_key='_combo')
     ordered_rows = ordered if ordered is not None else rows
+    ordered_rows, grid_shape, prepended = with_reference_tile(ordered_rows, grid_shape, ref_row)
+
     tiles = []
     for r in ordered_rows:
         if r is None:
@@ -213,14 +245,17 @@ def main():
         vdir = session_dir / r['_dirname']
         img_path = vdir / result_filename(r['_dirname'], 'detected', 'jpg')
         # cv2.putTextはASCIIのみ描画可能（日本語は文字化けする）ため英語表記にする
-        label = (combo_label(r['_combo'], unit_map).replace(', ', '\n')
-                  + f"\ndet:{r['n_detections']} conf:{r['avg_conf']:.2f}")
+        combo_text = 'AUTO reference' if r is ref_row else combo_label(r['_combo'], unit_map).replace(', ', '\n')
+        label = f"{combo_text}\ndet:{r['n_detections']} conf:{r['avg_conf']:.2f}"
         tiles.append((str(img_path) if img_path.exists() else None, label))
     comparison_path = session_dir / 'comparison_detected.png'
     if build_montage(tiles, comparison_path,
                       title=f"detection comparison - {', '.join(names)}",
                       grid_shape=grid_shape):
         print(f"比較画像: {comparison_path}")
+    if ref_row and not prepended:
+        print(f"参考: AutoのYOLO検出結果は {session_dir / ref_row['_dirname']} を確認してください"
+              f"（{len(names)}パラメータの比較グリッドには含めていません）")
 
     # --- グラフ ---
     if plt is None:
