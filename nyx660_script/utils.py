@@ -38,7 +38,7 @@ def load_config():
         # params_json（唯一の情報源）から読み取ってデフォルトにする
         _fill_camera_defaults_from_params_json(cfg['camera'], params_path)
     # output paths: ~展開 → 相対パスならconfig.yaml基準で解決
-    for key in ('images_dir', 'pointcloud_dir', 'timelapse_dir', 'mp4_dir'):
+    for key in ('images_dir', 'pointcloud_dir', 'timelapse_dir', 'mp4_dir', 'param_tune_dir'):
         if key not in cfg['output']:
             continue
         p = os.path.expanduser(cfg['output'][key])

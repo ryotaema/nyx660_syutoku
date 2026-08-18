@@ -10,6 +10,10 @@ data/**
 !data/**/
 !data/**/.gitkeep
 
+# param_tune のGUIが生成する撮影設定（試行錯誤も含むため既定では非公開。
+# 公開・共有したいものだけ `git add -f tools/param_tune/configs/xxx.json` で個別に追加する）
+tools/param_tune/configs/
+
 # Python キャッシュ
 __pycache__/
 *.pyc

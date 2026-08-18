@@ -1,0 +1,530 @@
+#!/usr/bin/env python3
+"""NYX660のカメラパラメータを1つ、または複数同時に振りながら
+color/depth/depth_colormap（・点群）を撮り比べるツール。
+
+露光時間やフィルタ閾値などを変えたときに画質・深度がどう変わるかを
+値の組み合わせごとのフォルダに保存し、後から見比べられるようにする。撮影後は
+detect_eval.py でYOLO検出結果を集計し、どの値・どの組み合わせが有用か判断できる。
+
+対応パラメータ一覧の表示:
+    python3 tools/param_tune/param_sweep.py --list
+
+値の指定方法（--values / GUIの「値」欄）:
+    "1000,2000,3000"   カンマ区切りで値を列挙
+    "1:10:1"            start:stop:step（stopを含む等差数列）。例:
+                         1:10:1 → 1,2,3,4,5,6,7,8,9,10（1から10まで1刻み）
+                         0:100:20 → 0,20,40,60,80,100
+
+使い方（例）:
+    # ToF露光時間を 1000,2000,3000,5000,8000 us で振って撮影（自動モード）
+    python3 tools/param_tune/param_sweep.py --param tof_exposure \\
+        --values 1000,2000,3000,5000,8000
+
+    # 時間フィルタ閾値を 1〜10 まで1刻みで振る（start:stop:step）
+    python3 tools/param_tune/param_sweep.py --param time_filter_threshold \\
+        --values 1:10:1
+
+    # 複数パラメータを同時に振る（--param/--valuesを対で複数回指定）。
+    # 既定は全組み合わせ（直積・product）: ToF露光5値 × 時間フィルタ3値 = 15通り撮影
+    python3 tools/param_tune/param_sweep.py \\
+        --param tof_exposure --values 1000,3000,5000,8000,12000 \\
+        --param time_filter_threshold --values 1,3,5
+
+    # 値の個数を揃えて1対1で組にする場合は --combine zip
+    # （tof_exposure=1000&threshold=1, 3000&3, 5000&5 の3通りのみ撮影）
+    python3 tools/param_tune/param_sweep.py \\
+        --param tof_exposure --values 1000,3000,5000 \\
+        --param time_filter_threshold --values 1,3,5 --combine zip
+
+    # Colorをマニュアル露光にしてgainも振る、点群フィルタ（空間フィルタ）も対象にできる
+    python3 tools/param_tune/param_sweep.py --param color_gain --values 1,2,4,8,16
+    python3 tools/param_tune/param_sweep.py --param spatial_filter --values 0,1
+
+    # Color自動露光の上限を振る（color_exposure/color_gainと違いAutoモードのまま使う）
+    python3 tools/param_tune/param_sweep.py --param color_aec_max_exposure_time --values 20000,50000,100000
+
+    # param_sweep_gui.py で作成した設定ファイルから実行
+    python3 tools/param_tune/param_sweep.py --config configs/20260818_153000_tof_exposure.json
+
+GUIでの設定:
+    python3 tools/param_tune/param_sweep_gui.py
+    振るパラメータ（複数追加可）・値の範囲・組み合わせ方（直積/対応）・
+    待機フレーム数・振らない他パラメータの基準値をフォームで設定し、
+    そのまま撮影を開始できる（内部でこのスクリプトを --config 付きで呼び出す）。
+
+保存先:
+    output.param_tune_dir（既定 ../data/param_tune）/<YYMMDD>/<prefix>_<param1+param2...>[_<tag>]/
+        intrinsics.json
+        metadata.json                    # パラメータ名・要求値/実機読み戻し値・基準値の一覧
+        comparison_color.png             # 全組み合わせのcolorを1枚に並べた比較画像
+        comparison_depth_colormap.png    # 同上、depth_colormap版
+        <param1>-<値1>_<param2>-<値2>/                      # 組み合わせごとのフォルダ
+            <param1>-<値1>_<param2>-<値2>_color.png          # ファイル名にも組み合わせを埋め込む
+            <param1>-<値1>_<param2>-<値2>_depth.png           # （フォルダ外にコピーしても判別できるように）
+            <param1>-<値1>_<param2>-<値2>_depth_colormap.png
+            <param1>-<値1>_<param2>-<値2>_pointcloud.ply     # --pointcloud 指定時のみ
+
+comparison_*.png はパラメータ1個なら値の昇順で1行、パラメータ2個で直積(product)なら
+2次元グリッド（行/列がそれぞれのパラメータ値）に自動で並べる。それ以外（3個以上 or zip）は
+撮影順の自動グリッド。detect_eval.py もYOLO検出結果を同様にcomparison_detected.pngへまとめる。
+
+振らない他のパラメータは config.yaml の camera.params_json（現行プロファイル）の値のまま
+固定されるが、--config の baseline_overrides でその基準値も明示的に上書きできる。
+"""
+
+import sys
+import gc
+import json
+import itertools
+import cv2
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / 'nyx660_script'))
+
+from common import (
+    PARAM_META, parse_values, cast_value, combo_dirname, combo_label,
+    result_filename, build_montage, montage_grid_for_combos,
+)
+from utils import (
+    load_config, build_parser, apply_args, init_sdk, open_camera, close_camera,
+    extract_depth, extract_color, make_depth_colormap, save_ply, save_intrinsics, Session,
+)
+
+
+def _build_arg_parser():
+    p = build_parser()
+    p.add_argument('--config', type=str, default=None, metavar='PATH',
+                    help='param_sweep_gui.py で保存した設定JSON。CLI引数はこの設定より優先される')
+    p.add_argument('--param', action='append', default=None, metavar='NAME',
+                    help='振るパラメータ名（--list で一覧表示）。複数指定すると--valuesと'
+                         '順番に対になり、複数パラメータの組み合わせを撮影する')
+    p.add_argument('--values', action='append', default=None, metavar='SPEC',
+                    help='"1000,2000,3000" または "start:stop:step"（stop含む）。'
+                         '--param と同じ回数・同じ順番で指定する')
+    p.add_argument('--combine', choices=['product', 'zip'], default=None,
+                    help='複数パラメータ指定時の組み合わせ方: product=全組み合わせ（既定）'
+                         ' | zip=同じ順番同士を1対1で対応させる（値の個数を揃える必要あり）')
+    p.add_argument('--mode', choices=['auto', 'manual'], default=None,
+                    help='auto: 値ごとに自動で撮影 | manual: プレビューを見て[s]で撮影・[n]でスキップ'
+                         '（既定: auto）')
+    p.add_argument('--warmup-frames', type=int, default=None, metavar='N',
+                    help='パラメータ変更後、撮影前に読み捨てるフレーム数（既定: 10）'
+                         '。露光・時間フィルタの安定待ち')
+    p.add_argument('--pointcloud', action='store_true',
+                    help='値ごとに点群(.ply)も保存する（既定はcolor/depthのみ）')
+    p.add_argument('--pause', type=float, default=None, metavar='SEC',
+                    help='autoモードで撮影後に結果を表示しておく秒数（既定: 0.3）')
+    p.add_argument('--list', action='store_true',
+                    help='調整可能なパラメータの一覧を表示して終了する')
+    return p
+
+
+def _print_param_list():
+    print("調整可能なパラメータ:")
+    for name, meta in PARAM_META.items():
+        unit = f" ({meta['unit']})" if meta['unit'] else ""
+        print(f"  {name:<30} {meta['label']}{unit}  [{meta['type']}]")
+        print(f"      {meta['hint']}")
+
+
+def _resolve_sweeps(args, file_cfg, parser):
+    """CLI引数（複数の--param/--values）と--config由来のsweep定義をマージし、
+    [{'param': name, 'values': [...]}] の形にそろえる。CLIが指定されていればCLI優先。
+    """
+    if args.param:
+        values_list = args.values or []
+        if len(args.param) != len(values_list):
+            parser.error("--param と --values は同じ回数、対になるように指定してください")
+        raw_sweeps = [{'param': p, 'values': v} for p, v in zip(args.param, values_list)]
+    else:
+        raw_sweeps = file_cfg.get('sweeps')
+        if not raw_sweeps and file_cfg.get('param'):
+            raw_sweeps = [{'param': file_cfg['param'], 'values': file_cfg.get('values')}]
+
+    if not raw_sweeps:
+        parser.error("--param/--values が必要です（--list で一覧表示、または --config を指定）")
+
+    sweep_specs = []
+    seen = set()
+    for s in raw_sweeps:
+        name = s.get('param')
+        if name not in PARAM_META:
+            parser.error(f"--param が不正です: {name!r}（--list で一覧表示）\n"
+                          f"選択肢: {', '.join(PARAM_META)}")
+        if name in seen:
+            parser.error(f"同じパラメータを複数回指定しています: {name}")
+        seen.add(name)
+        raw_values = s.get('values')
+        if not raw_values:
+            parser.error(f"--values が必要です（{name}）")
+        values = list(raw_values) if isinstance(raw_values, (list, tuple)) else parse_values(raw_values)
+        sweep_specs.append({'param': name, 'values': values})
+    return sweep_specs
+
+
+def _build_combos(sweep_specs, combine, parser):
+    names = [s['param'] for s in sweep_specs]
+    if combine == 'zip':
+        lengths = {len(s['values']) for s in sweep_specs}
+        if len(lengths) != 1:
+            parser.error("--combine zip では全パラメータの値の個数を揃えてください"
+                          f"（現在: {[len(s['values']) for s in sweep_specs]}）")
+        n = lengths.pop()
+        return [{name: sweep_specs[i]['values'][j] for i, name in enumerate(names)} for j in range(n)]
+    return [dict(zip(names, vals)) for vals in itertools.product(*(s['values'] for s in sweep_specs))]
+
+
+def main():
+    parser = _build_arg_parser()
+    args = parser.parse_args()
+
+    if args.list:
+        _print_param_list()
+        return
+
+    file_cfg = {}
+    if args.config:
+        with open(args.config) as f:
+            file_cfg = json.load(f)
+
+    sweep_specs = _resolve_sweeps(args, file_cfg, parser)
+    names = [s['param'] for s in sweep_specs]
+    combine = args.combine or file_cfg.get('combine', 'product')
+    combos = _build_combos(sweep_specs, combine, parser)
+
+    mode           = args.mode if args.mode is not None else file_cfg.get('mode', 'auto')
+    warmup_frames  = args.warmup_frames if args.warmup_frames is not None else int(file_cfg.get('warmup_frames', 10))
+    pause          = args.pause if args.pause is not None else float(file_cfg.get('pause', 0.3))
+    pointcloud     = args.pointcloud or bool(file_cfg.get('pointcloud', False))
+    user_tag       = args.tag or file_cfg.get('tag')
+    baseline_overrides = file_cfg.get('baseline_overrides') or {}
+
+    unknown = [k for k in baseline_overrides if k not in PARAM_META]
+    if unknown:
+        parser.error(f"baseline_overrides に未知のパラメータがあります: {unknown}")
+
+    if len(combos) > 50:
+        print(f"警告: {len(combos)} 通りの組み合わせを撮影します。時間がかかる場合があります。")
+
+    cfg = apply_args(load_config(), args)
+    init_sdk(cfg)
+
+    from API.ScepterDS_enums import ScFrameType, ScSensorType, ScExposureControlMode
+    from API.ScepterDS_types import (
+        ScTimeFilterParams, ScConfidenceFilterParams, ScFlyingPixelFilterParams, ScIRGMMCorrectionParams,
+    )
+    from ctypes import c_uint16, c_int32, c_uint8, c_float, c_bool
+
+    def _check(name, ret):
+        if ret != 0:
+            print(f"警告: {name} failed: {ret}")
+
+    def _ensure_manual(cam, sensor_type, label):
+        _check(f"scSetExposureControlMode({label})", cam.scSetExposureControlMode(
+            sensor_type, ScExposureControlMode.SC_EXPOSURE_CONTROL_MODE_MANUAL))
+
+    def _set_tof_exposure(cam, value):
+        _ensure_manual(cam, ScSensorType.SC_TOF_SENSOR, 'ToF')
+        _check("scSetExposureTime(ToF)", cam.scSetExposureTime(ScSensorType.SC_TOF_SENSOR, c_int32(value)))
+
+    def _get_tof_exposure(cam):
+        return cam.scGetExposureTime(ScSensorType.SC_TOF_SENSOR)[1]
+
+    def _set_color_exposure(cam, value):
+        _ensure_manual(cam, ScSensorType.SC_COLOR_SENSOR, 'Color')
+        _check("scSetExposureTime(Color)", cam.scSetExposureTime(ScSensorType.SC_COLOR_SENSOR, c_int32(value)))
+
+    def _get_color_exposure(cam):
+        return cam.scGetExposureTime(ScSensorType.SC_COLOR_SENSOR)[1]
+
+    def _set_color_gain(cam, value):
+        # gainはColor露光がManualの時のみ有効（SDKサンプル ColorExposureTimeSetGet 準拠）
+        _ensure_manual(cam, ScSensorType.SC_COLOR_SENSOR, 'Color')
+        _check("scSetColorGain", cam.scSetColorGain(c_float(value)))
+
+    def _get_color_gain(cam):
+        return cam.scGetColorGain()[1]
+
+    def _set_color_aec_max_exposure(cam, value):
+        # 自動露光の上限なのでColor露光はAutoに戻す（color_exposure/color_gainとは逆）
+        _check("scSetExposureControlMode(Color)", cam.scSetExposureControlMode(
+            ScSensorType.SC_COLOR_SENSOR, ScExposureControlMode.SC_EXPOSURE_CONTROL_MODE_AUTO))
+        _check("scSetColorAECMaxExposureTime", cam.scSetColorAECMaxExposureTime(c_int32(value)))
+
+    def _get_color_aec_max_exposure(cam):
+        return cam.scGetColorAECMaxExposureTime()[1]
+
+    def _set_time_filter(cam, value):
+        p = ScTimeFilterParams()
+        p.enable = True
+        p.threshold = value
+        _check("scSetTimeFilterParams", cam.scSetTimeFilterParams(p))
+
+    def _get_time_filter(cam):
+        return cam.scGetTimeFilterParams()[1].threshold
+
+    def _set_confidence_filter(cam, value):
+        p = ScConfidenceFilterParams()
+        p.enable = True
+        p.threshold = value
+        _check("scSetConfidenceFilterParams", cam.scSetConfidenceFilterParams(p))
+
+    def _get_confidence_filter(cam):
+        return cam.scGetConfidenceFilterParams()[1].threshold
+
+    def _set_flying_pixel_filter(cam, value):
+        p = ScFlyingPixelFilterParams()
+        p.enable = True
+        p.threshold = value
+        _check("scSetFlyingPixelFilterParams", cam.scSetFlyingPixelFilterParams(p))
+
+    def _get_flying_pixel_filter(cam):
+        return cam.scGetFlyingPixelFilterParams()[1].threshold
+
+    def _set_spatial_filter(cam, value):
+        _check("scSetSpatialFilterEnabled", cam.scSetSpatialFilterEnabled(c_bool(value)))
+
+    def _get_spatial_filter(cam):
+        return cam.scGetSpatialFilterEnabled()[1]
+
+    def _set_fillhole_filter(cam, value):
+        _check("scSetFillHoleFilterEnabled", cam.scSetFillHoleFilterEnabled(c_bool(value)))
+
+    def _get_fillhole_filter(cam):
+        return cam.scGetFillHoleFilterEnabled()[1]
+
+    def _set_ir_gmm_gain(cam, value):
+        _check("scSetIRGMMGain", cam.scSetIRGMMGain(c_uint8(value)))
+
+    def _get_ir_gmm_gain(cam):
+        return cam.scGetIRGMMGain()[1]
+
+    def _set_ir_gmm_correction_threshold(cam, value):
+        p = ScIRGMMCorrectionParams()
+        p.enable = True
+        p.threshold = value
+        _check("scSetIRGMMCorrection", cam.scSetIRGMMCorrection(p))
+
+    def _get_ir_gmm_correction_threshold(cam):
+        return cam.scGetIRGMMCorrection()[1].threshold
+
+    _setters = {
+        'tof_exposure': _set_tof_exposure,
+        'color_exposure': _set_color_exposure,
+        'color_gain': _set_color_gain,
+        'color_aec_max_exposure_time': _set_color_aec_max_exposure,
+        'time_filter_threshold': _set_time_filter,
+        'confidence_filter_threshold': _set_confidence_filter,
+        'flying_pixel_filter_threshold': _set_flying_pixel_filter,
+        'spatial_filter': _set_spatial_filter,
+        'fillhole_filter': _set_fillhole_filter,
+        'ir_gmm_gain': _set_ir_gmm_gain,
+        'ir_gmm_correction_threshold': _set_ir_gmm_correction_threshold,
+    }
+    _getters = {
+        'tof_exposure': _get_tof_exposure,
+        'color_exposure': _get_color_exposure,
+        'color_gain': _get_color_gain,
+        'color_aec_max_exposure_time': _get_color_aec_max_exposure,
+        'time_filter_threshold': _get_time_filter,
+        'confidence_filter_threshold': _get_confidence_filter,
+        'flying_pixel_filter_threshold': _get_flying_pixel_filter,
+        'spatial_filter': _get_spatial_filter,
+        'fillhole_filter': _get_fillhole_filter,
+        'ir_gmm_gain': _get_ir_gmm_gain,
+        'ir_gmm_correction_threshold': _get_ir_gmm_correction_threshold,
+    }
+    param_specs = {name: {**meta, 'setter': _setters[name], 'getter': _getters[name]}
+                   for name, meta in PARAM_META.items()}
+
+    def apply_param(cam, name, value):
+        casted = cast_value(name, value)
+        param_specs[name]['setter'](cam, casted)
+        return casted
+
+    unit_map = {name: param_specs[name]['unit'] for name in PARAM_META}
+    depth_alpha = cfg['camera'].get('depth_alpha', 0.4)
+
+    dir_tag = "+".join(names) if not user_tag else f"{'+'.join(names)}_{user_tag}"
+    session = Session(cfg['output']['param_tune_dir'], tag=dir_tag)
+    print(f"保存先: {session.dir}")
+    print(f"パラメータ: {[(n, param_specs[n]['label']) for n in names]}")
+    print(f"組み合わせ数: {len(combos)}（combine={combine}）")
+    print(f"モード: {mode}  warmup: {warmup_frames}フレーム  点群: {'ON' if pointcloud else 'OFF'}")
+    if baseline_overrides:
+        print(f"基準値の上書き: {baseline_overrides}")
+
+    try:
+        cam = open_camera(cfg)
+    except RuntimeError as e:
+        print(f"エラー: {e}")
+        sys.exit(1)
+
+    save_intrinsics(cam, str(session.dir))
+
+    for bname, bvalue in baseline_overrides.items():
+        if bname in names:
+            print(f"情報: baseline_overrides の {bname} はスイープ対象のため無視します")
+            continue
+        apply_param(cam, bname, bvalue)
+
+    def grab_frame():
+        ret, frameready = cam.scGetFrameReady(c_uint16(1200))
+        if ret != 0:
+            return None
+        color = depth = df = None
+        if frameready.color:
+            ret, cf = cam.scGetFrame(ScFrameType.SC_COLOR_FRAME)
+            if ret == 0:
+                color = extract_color(cf)
+        if frameready.depth:
+            ret, dfr = cam.scGetFrame(ScFrameType.SC_DEPTH_FRAME)
+            if ret == 0:
+                depth = extract_depth(dfr)
+                df = dfr
+        if color is None or depth is None:
+            return None
+        return color, depth, df
+
+    def save_capture(vdir, color, depth, df):
+        vdir.mkdir(parents=True, exist_ok=True)
+        # ファイル単体でどの組み合わせの撮影か分かるよう、ディレクトリ名と同じ接頭辞を
+        # ファイル名にも付ける（<dirname>_color.png 等）。1つのフォルダに全部コピーして
+        # 見比べる場合でも名前だけで区別できるようにするため。
+        tag = vdir.name
+        # 微妙な画質差も見比べたいため非可逆圧縮のjpgではなくpngで保存する
+        cv2.imwrite(str(vdir / result_filename(tag, 'color', 'png')), color)
+        cv2.imwrite(str(vdir / result_filename(tag, 'depth', 'png')), depth)
+        depth_cm = make_depth_colormap(depth, depth_alpha)
+        cv2.imwrite(str(vdir / result_filename(tag, 'depth_colormap', 'png')), depth_cm)
+        if pointcloud:
+            ret, pointlist = cam.scConvertDepthFrameToPointCloudVector(df)
+            if ret == 0:
+                save_ply(str(vdir / result_filename(tag, 'pointcloud', 'ply')), pointlist, df.width * df.height)
+        return depth_cm
+
+    results = []
+    aborted = False
+
+    try:
+        for combo in combos:
+            combo_casted = {name: apply_param(cam, name, value) for name, value in combo.items()}
+
+            attempts = 0
+            warm = 0
+            while warm < warmup_frames and attempts < warmup_frames * 5:
+                if grab_frame() is not None:
+                    warm += 1
+                attempts += 1
+
+            actual = {name: param_specs[name]['getter'](cam) for name in combo_casted}
+            match = all(str(combo_casted[n]) == str(actual[n]) for n in combo_casted)
+            vdir = session.dir / combo_dirname(combo_casted)
+            label = combo_label(combo_casted, unit_map)
+            actual_label = combo_label(actual, unit_map)
+
+            if mode == 'manual':
+                saved = False
+                skipped = False
+                while not saved and not skipped:
+                    frame = grab_frame()
+                    if frame is None:
+                        continue
+                    color, depth, df = frame
+                    preview = cv2.resize(color, (800, 600))
+                    text = f"{label}  (実機: {actual_label})  [s]保存 [n]スキップ [q]終了"
+                    cv2.putText(preview, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+                    cv2.imshow('param_tune', preview)
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord('s'):
+                        save_capture(vdir, color, depth, df)
+                        saved = True
+                    elif key == ord('n'):
+                        skipped = True
+                    elif key == ord('q'):
+                        aborted = True
+                        skipped = True
+                results.append({'combo': combo_casted, 'actual': actual, 'saved': saved, 'dirname': vdir.name})
+                print(f"  {'OK ' if match else '!! '}{label}  実機: {actual_label}  "
+                      f"{'保存' if saved else 'スキップ'}")
+                if aborted:
+                    break
+            else:
+                frame = grab_frame()
+                if frame is None:
+                    print(f"  警告: フレーム取得に失敗、{label} をスキップします")
+                    results.append({'combo': combo_casted, 'actual': actual, 'saved': False, 'dirname': vdir.name})
+                    continue
+                color, depth, df = frame
+                save_capture(vdir, color, depth, df)
+                results.append({'combo': combo_casted, 'actual': actual, 'saved': True, 'dirname': vdir.name})
+                print(f"  {'OK ' if match else '!! '}{label}  実機: {actual_label}  → {vdir.name}/")
+
+                preview = cv2.resize(color, (800, 600))
+                cv2.putText(preview, f"{label} (実機: {actual_label})",
+                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+                cv2.imshow('param_tune', preview)
+                key = cv2.waitKey(max(int(pause * 1000), 1)) & 0xFF
+                if key == ord('q'):
+                    aborted = True
+                    break
+
+    finally:
+        sweeps_meta = [{'param': s['param'], 'label': param_specs[s['param']]['label'],
+                        'unit': param_specs[s['param']]['unit'], 'values': s['values']}
+                       for s in sweep_specs]
+        session.write_metadata(
+            camera={'model': 'NYX660',
+                    'resolution': [cfg['camera'].get('color_width'), cfg['camera'].get('color_height')],
+                    'fps': cfg['camera'].get('fps'),
+                    'params_json': cfg['camera'].get('params_json')},
+            params=names,
+            sweeps=sweeps_meta,
+            combine=combine,
+            mode=mode,
+            warmup_frames=warmup_frames,
+            pointcloud=pointcloud,
+            baseline_overrides=baseline_overrides,
+            config_file=args.config,
+            aborted=aborted,
+            results=results,
+        )
+        close_camera(cam)
+        cv2.destroyAllWindows()
+        n_saved = sum(1 for r in results if r['saved'])
+        print(f"\n完了: {n_saved}/{len(combos)} 通りを保存 → {session.dir}")
+        if n_saved > 0:
+            _build_comparison_images(session.dir, results, names, combine, unit_map)
+        print(f"検出集計は次のコマンドで実行できます:")
+        print(f"  python3 {Path(__file__).parent / 'detect_eval.py'} {session.dir}")
+        gc.collect()
+
+
+def _build_comparison_images(session_dir, results, names, combine, unit_map):
+    """全組み合わせのcolor/depth_colormapを1枚のコンタクトシート画像にまとめて保存する。"""
+    saved = [r for r in results if r['saved']]
+    if not saved:
+        return
+    grid_shape, ordered = montage_grid_for_combos(saved, names, combine)
+    ordered_results = ordered if ordered is not None else saved
+
+    for modality in ('color', 'depth_colormap'):
+        tiles = []
+        for r in ordered_results:
+            if r is None:
+                tiles.append((None, ''))
+                continue
+            img_path = session_dir / r['dirname'] / result_filename(r['dirname'], modality, 'png')
+            label = combo_label(r['combo'], unit_map).replace(', ', '\n')
+            tiles.append((str(img_path) if img_path.exists() else None, label))
+
+        out_path = session_dir / f'comparison_{modality}.png'
+        # cv2.putTextはASCIIのみ描画可能（日本語は文字化けする）ため英語表記にする
+        title = f"{modality} comparison - {', '.join(names)}"
+        if build_montage(tiles, out_path, title=title, grid_shape=grid_shape):
+            print(f"比較画像: {out_path}")
+
+
+if __name__ == '__main__':
+    main()

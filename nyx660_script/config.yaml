@@ -26,6 +26,7 @@ output:
   pointcloud_dir: ../data/pointcloud
   timelapse_dir: ../data/timelapse_data
   mp4_dir: ../data/mp4
+  param_tune_dir: ../data/param_tune  # tools/param_tune/param_sweep.py の保存先
 
 model:
   yolo_path: model/260727_pepper_yolo26x_best.pt          # config.yaml からの相対パス
