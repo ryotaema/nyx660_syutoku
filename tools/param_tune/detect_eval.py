@@ -233,8 +233,17 @@ def main():
           f"（検出{best['n_detections']}個, 平均信頼度{best['avg_conf']:.3f}）")
 
     # --- 検出結果の比較画像（BBox描画済み画像を1枚のコンタクトシートに） ---
-    grid_shape, ordered = montage_grid_for_combos(rows, names, combine, combo_key='_combo')
+    grid_shape, ordered, axis_info = montage_grid_for_combos(rows, names, combine, combo_key='_combo')
     ordered_rows = ordered if ordered is not None else rows
+
+    # パラメータ2個・直積の2次元グリッドの場合のみ、行/列見出し（値の昇順）を用意する。
+    row_labels = col_labels = row_axis_name = col_axis_name = None
+    if axis_info:
+        col_labels = [f"{v}{unit_map.get(axis_info['x_name'], '')}" for v in axis_info['x_values']]
+        row_labels = [f"{v}{unit_map.get(axis_info['y_name'], '')}" for v in axis_info['y_values']]
+        col_axis_name = axis_info['x_name']
+        row_axis_name = axis_info['y_name']
+
     ordered_rows, grid_shape, prepended = with_reference_tile(ordered_rows, grid_shape, ref_row)
 
     tiles = []
@@ -251,7 +260,9 @@ def main():
     comparison_path = session_dir / 'comparison_detected.png'
     if build_montage(tiles, comparison_path,
                       title=f"detection comparison - {', '.join(names)}",
-                      grid_shape=grid_shape):
+                      grid_shape=grid_shape,
+                      row_labels=row_labels, col_labels=col_labels,
+                      row_axis_name=row_axis_name, col_axis_name=col_axis_name):
         print(f"比較画像: {comparison_path}")
     if ref_row and not prepended:
         print(f"参考: AutoのYOLO検出結果は {session_dir / ref_row['_dirname']} を確認してください"
