@@ -47,6 +47,11 @@ detect_eval.py でYOLO検出結果を集計し、どの値・どの組み合わ�
     python3 tools/param_tune/param_sweep.py --param hdr_mode --values 0,1
     python3 tools/param_tune/param_sweep.py --param wdr_mode --values 0,1
 
+    # 静止シーンをtof_exposure違いで連続撮影し、後でhdr_compose.pyで合成する
+    # （--save-irでIRフレームも保存。飽和判定に使う。詳細はhdr_compose.py --help）
+    python3 tools/param_tune/param_sweep.py --param tof_exposure --values 1000:8000:1000 \\
+        --save-ir --no-auto-reference
+
     # param_sweep_gui.py で作成した設定ファイルから実行
     python3 tools/param_tune/param_sweep.py --config configs/20260818_153000_tof_exposure.json
 
@@ -105,6 +110,7 @@ GUIでの設定:
             <param1>-<値1>_<param2>-<値2>_color.png          # ファイル名にも組み合わせを埋め込む
             <param1>-<値1>_<param2>-<値2>_depth.png           # （フォルダ外にコピーしても判別できるように）
             <param1>-<値1>_<param2>-<値2>_depth_colormap.png
+            <param1>-<値1>_<param2>-<値2>_ir.png             # --save-ir 指定時のみ
             <param1>-<値1>_<param2>-<値2>_pointcloud.ply     # --pointcloud 指定時のみ
 
 comparison_*.png はパラメータ1個なら値の昇順で1行、パラメータ2個で直積(product)なら
@@ -132,7 +138,7 @@ from common import (
 )
 from utils import (
     load_config, build_parser, apply_args, init_sdk, open_camera, close_camera,
-    extract_depth, extract_color, make_depth_colormap, save_ply, save_intrinsics, Session,
+    extract_depth, extract_color, extract_ir, make_depth_colormap, save_ply, save_intrinsics, Session,
 )
 
 # FPS自動調整（--auto-fps-adjust）で段階的に下げていく候補（降順）。
@@ -165,6 +171,9 @@ def _build_arg_parser():
                          '。露光・時間フィルタの安定待ち')
     p.add_argument('--pointcloud', action='store_true',
                     help='値ごとに点群(.ply)も保存する（既定はcolor/depthのみ）')
+    p.add_argument('--save-ir', dest='save_ir', action='store_true',
+                    help='値ごとにIRフレーム(ir.png, 8bitグレースケール)も保存する'
+                         '（既定OFF）。hdr_compose.pyでの後処理合成（画素の飽和判定）用')
     p.add_argument('--pause', type=float, default=None, metavar='SEC',
                     help='autoモードで撮影後に結果を表示しておく秒数（既定: 0.3）')
     p.add_argument('--auto-reference', dest='auto_reference', action='store_true', default=None,
@@ -183,7 +192,9 @@ def _build_arg_parser():
                          'DIRに既存セッションのディレクトリパスを指定するか、省略/"latest"で'
                          'param_tune_dir配下から同じパラメータ組み合わせ（--param/--values or '
                          '--config、--tagも一致）の最新セッションを自動で探す。--param/--values/'
-                         '--config は中断時と同じ内容を指定すること（組み合わせの再計算に必要）')
+                         '--config は中断時と同じ内容を指定すること（組み合わせの再計算に必要）。'
+                         '--configのJSON側に"resume"キー（"latest"またはパス）で指定してもよい'
+                         '（GUIの再開欄はこちらを使う）')
     p.add_argument('--list', action='store_true',
                     help='調整可能なパラメータの一覧を表示して終了する')
     return p
@@ -295,6 +306,7 @@ def main():
     warmup_frames  = args.warmup_frames if args.warmup_frames is not None else int(file_cfg.get('warmup_frames', 10))
     pause          = args.pause if args.pause is not None else float(file_cfg.get('pause', 0.3))
     pointcloud     = args.pointcloud or bool(file_cfg.get('pointcloud', False))
+    save_ir        = args.save_ir or bool(file_cfg.get('save_ir', False))
     auto_reference = args.auto_reference if args.auto_reference is not None else bool(file_cfg.get('auto_reference', True))
     auto_fps_adjust = args.auto_fps_adjust if args.auto_fps_adjust is not None \
         else bool(file_cfg.get('auto_fps_adjust', False))
@@ -535,15 +547,16 @@ def main():
 
     dir_tag = "+".join(names) if not user_tag else f"{'+'.join(names)}_{user_tag}"
 
+    resume_spec = args.resume if args.resume is not None else file_cfg.get('resume')
     resume_dir = None
-    if args.resume:
-        if args.resume == 'latest':
+    if resume_spec:
+        if resume_spec == 'latest':
             resume_dir = find_resumable_session(cfg['output']['param_tune_dir'], dir_tag)
             if resume_dir is None:
                 parser.error(f"--resume latest: パラメータ組み合わせ「{dir_tag}」に一致する"
                               "既存セッションが見つかりませんでした")
         else:
-            resume_dir = Path(args.resume).expanduser()
+            resume_dir = Path(resume_spec).expanduser()
             if not resume_dir.is_dir():
                 parser.error(f"--resume: ディレクトリが見つかりません: {resume_dir}")
 
@@ -552,6 +565,7 @@ def main():
     print(f"パラメータ: {[(n, param_specs[n]['label']) for n in names]}")
     print(f"組み合わせ数: {len(combos)}（combine={combine}）")
     print(f"モード: {mode}  warmup: {warmup_frames}フレーム  点群: {'ON' if pointcloud else 'OFF'}"
+          f"  IR保存: {'ON' if save_ir else 'OFF'}"
           f"  Auto参考撮影: {'ON' if auto_reference else 'OFF'}"
           f"  FPS自動調整: {'ON' if auto_fps_adjust else 'OFF'}（基準FPS={fps_state['fps']}）")
     if baseline_overrides:
@@ -577,7 +591,7 @@ def main():
         ret, frameready = cam.scGetFrameReady(c_uint16(1200))
         if ret != 0:
             return None
-        color = depth = df = None
+        color = depth = df = ir = None
         if frameready.color:
             ret, cf = cam.scGetFrame(ScFrameType.SC_COLOR_FRAME)
             if ret == 0:
@@ -587,11 +601,15 @@ def main():
             if ret == 0:
                 depth = extract_depth(dfr)
                 df = dfr
+        if save_ir and frameready.ir:
+            ret, irf = cam.scGetFrame(ScFrameType.SC_IR_FRAME)
+            if ret == 0:
+                ir = extract_ir(irf)
         if color is None or depth is None:
             return None
-        return color, depth, df
+        return color, depth, df, ir
 
-    def save_capture(vdir, color, depth, df):
+    def save_capture(vdir, color, depth, df, ir):
         vdir.mkdir(parents=True, exist_ok=True)
         # ファイル単体でどの組み合わせの撮影か分かるよう、ディレクトリ名と同じ接頭辞を
         # ファイル名にも付ける（<dirname>_color.png 等）。1つのフォルダに全部コピーして
@@ -602,6 +620,8 @@ def main():
         cv2.imwrite(str(vdir / result_filename(tag, 'depth', 'png')), depth)
         depth_cm = make_depth_colormap(depth, depth_alpha)
         cv2.imwrite(str(vdir / result_filename(tag, 'depth_colormap', 'png')), depth_cm)
+        if save_ir and ir is not None:
+            cv2.imwrite(str(vdir / result_filename(tag, 'ir', 'png')), ir)
         if pointcloud:
             ret, pointlist = cam.scConvertDepthFrameToPointCloudVector(df)
             if ret == 0:
@@ -613,7 +633,7 @@ def main():
         撮影後は変更前のexposure control mode/exposure timeに戻す
         （このあとのスイープ本体に影響を与えないため）。
         """
-        if resume_dir and session_has_result(session.dir / 'auto_reference', 'auto_reference', pointcloud):
+        if resume_dir and session_has_result(session.dir / 'auto_reference', 'auto_reference', pointcloud, save_ir):
             print("  Auto参考撮影: 既存の結果を再利用します（再開のためスキップ）")
             return {'dirname': 'auto_reference', 'actual': None, 'saved': True}
 
@@ -643,8 +663,8 @@ def main():
             'color_exposure': cam.scGetExposureTime(ScSensorType.SC_COLOR_SENSOR)[1],
         }
         if saved:
-            color, depth, df = frame
-            save_capture(vdir, color, depth, df)
+            color, depth, df, ir = frame
+            save_capture(vdir, color, depth, df, ir)
             print(f"  Auto参考撮影: 実機 tof_exposure={actual['tof_exposure']}us "
                   f"color_exposure={actual['color_exposure']}us  → {dirname}/")
         else:
@@ -676,7 +696,7 @@ def main():
             combo_casted = {name: cast_value(name, value) for name, value in combo.items()}
             vdir = session.dir / combo_dirname(combo_casted)
 
-            if resume_dir and session_has_result(vdir, vdir.name, pointcloud):
+            if resume_dir and session_has_result(vdir, vdir.name, pointcloud, save_ir):
                 results.append({'combo': combo_casted, 'actual': combo_casted, 'saved': True,
                                  'dirname': vdir.name, 'fps': fps_state['fps'], 'resumed': True})
                 print(f"  スキップ（既存）: {combo_label(combo_casted, unit_map)} → {vdir.name}/")
@@ -704,14 +724,14 @@ def main():
                     frame = grab_frame()
                     if frame is None:
                         continue
-                    color, depth, df = frame
+                    color, depth, df, ir = frame
                     preview = cv2.resize(color, (800, 600))
                     text = f"{label}  (実機: {actual_label})  [s]保存 [n]スキップ [q]終了"
                     cv2.putText(preview, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
                     cv2.imshow('param_tune', preview)
                     key = cv2.waitKey(1) & 0xFF
                     if key == ord('s'):
-                        save_capture(vdir, color, depth, df)
+                        save_capture(vdir, color, depth, df, ir)
                         saved = True
                     elif key == ord('n'):
                         skipped = True
@@ -731,8 +751,8 @@ def main():
                     results.append({'combo': combo_casted, 'actual': actual, 'saved': False, 'dirname': vdir.name,
                                      'fps': fps_state['fps']})
                     continue
-                color, depth, df = frame
-                save_capture(vdir, color, depth, df)
+                color, depth, df, ir = frame
+                save_capture(vdir, color, depth, df, ir)
                 results.append({'combo': combo_casted, 'actual': actual, 'saved': True, 'dirname': vdir.name,
                                  'fps': fps_state['fps']})
                 print(f"  {'OK ' if match else '!! '}{label}  実機: {actual_label}  → {vdir.name}/")
@@ -762,6 +782,7 @@ def main():
             mode=mode,
             warmup_frames=warmup_frames,
             pointcloud=pointcloud,
+            save_ir=save_ir,
             baseline_overrides=baseline_overrides,
             auto_fps_adjust=auto_fps_adjust,
             config_file=args.config,

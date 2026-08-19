@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""param_sweep.py の撮影設定をGUIで作成し、そのまま撮影を開始するツール。
+"""param_tune配下のツール群（撮影/再開・検出集計・HDR合成）をタブでまとめて操作するGUI。
 
-- 振るパラメータを1つ、または「+パラメータを追加」で複数追加して同時に振れる
-  （複数指定時は「組み合わせ方」で 直積=全組み合わせ / 対応=1対1 を選べる）
-- 値の範囲（"1000,2000,3000" または "start:stop:step"）
-- モード（auto/manual）・待機フレーム数・撮影後の表示秒数・点群保存の有無
-- 振らない他のパラメータの基準値（既定は現行プロファイルの値、上書き可能）
+- 「撮影」タブ: param_sweep.py の設定をフォームで作成し、そのまま撮影開始
+  （振るパラメータ・値の範囲・モード・IR保存・点群保存・中断セッションの再開など）
+- 「検出集計」タブ: detect_eval.py にセッションディレクトリを渡してYOLO集計を実行
+- 「HDR合成」タブ: hdr_compose.py に露光違いのセッションを渡して画素ごとの合成を実行
 
-をフォームで設定して JSON（tools/param_tune/configs/*.json）に保存し、
-そのまま「保存して撮影開始」で param_sweep.py --config <path> をサブプロセスで
-起動する（撮影中のプレビューウィンドウは別プロセスのcv2ウィンドウとして開く）。
+いずれもJSON設定を tools/param_tune/configs/ に保存した上でサブプロセスとして
+各スクリプトを起動する（同時に1つだけ実行可能。実行ログはウィンドウ下部で共有）。
 
 使い方:
     python3 tools/param_tune/param_sweep_gui.py
@@ -26,14 +24,17 @@ from datetime import datetime
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / 'nyx660_script'))
 
-from common import PARAM_META, parse_values, load_profile_baseline
+from common import PARAM_META, parse_values, load_profile_baseline, list_sessions
 from utils import load_config
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 
-SWEEP_SCRIPT = Path(__file__).resolve().parent / 'param_sweep.py'
-CONFIG_DIR   = Path(__file__).resolve().parent / 'configs'
+SCRIPT_DIR          = Path(__file__).resolve().parent
+SWEEP_SCRIPT        = SCRIPT_DIR / 'param_sweep.py'
+DETECT_EVAL_SCRIPT  = SCRIPT_DIR / 'detect_eval.py'
+HDR_COMPOSE_SCRIPT  = SCRIPT_DIR / 'hdr_compose.py'
+CONFIG_DIR          = SCRIPT_DIR / 'configs'
 
 
 def _display_for(name):
@@ -42,49 +43,89 @@ def _display_for(name):
     return f"{meta['label']}{unit} ({name})"
 
 
-class ParamSweepGUI:
+def _add_session_picker(parent, path_var, param_tune_dir, on_change=None):
+    """セッションディレクトリ選択用の共通ウィジェット行（Entry + 参照 + 最新候補一覧）を
+    parent に構築する。detect_eval / hdr_compose / sweepの再開先選択で共用する。
+    戻り値: 一覧を再読込するための refresh() 関数（初期表示にも使う）。
+    """
+    row = ttk.Frame(parent)
+    row.pack(fill='x', pady=(2, 2))
+    entry = ttk.Entry(row, textvariable=path_var, width=60)
+    entry.pack(side='left', fill='x', expand=True)
+
+    def _browse():
+        d = filedialog.askdirectory(initialdir=str(Path(param_tune_dir).expanduser()))
+        if d:
+            path_var.set(d)
+            if on_change:
+                on_change()
+
+    ttk.Button(row, text='参照...', command=_browse).pack(side='left', padx=(4, 0))
+
+    list_row = ttk.Frame(parent)
+    list_row.pack(fill='x', pady=(2, 4))
+    ttk.Label(list_row, text='最近のセッション:').pack(side='left')
+    combo_var = tk.StringVar()
+    combo = ttk.Combobox(list_row, textvariable=combo_var, state='readonly', width=64)
+    combo.pack(side='left', padx=(4, 0), fill='x', expand=True)
+
+    sessions = {}
+
+    def refresh():
+        sessions.clear()
+        items = list_sessions(param_tune_dir)
+        for it in items:
+            sessions[it['label']] = it['path']
+        combo['values'] = list(sessions.keys())
+
+    def _on_pick(_evt=None):
+        p = sessions.get(combo_var.get())
+        if p is not None:
+            path_var.set(str(p))
+            if on_change:
+                on_change()
+
+    combo.bind('<<ComboboxSelected>>', _on_pick)
+    ttk.Button(list_row, text='更新', command=refresh).pack(side='left', padx=(4, 0))
+
+    refresh()
+    return refresh
+
+
+class App:
+    """タブ共通の実行制御（同時に1プロセスまで）とログ表示を提供する入れ物。"""
+
     def __init__(self, root):
         self.root = root
-        root.title('NYX660 パラメータ撮影設定')
-        root.geometry('920x820')
-        root.minsize(700, 480)
+        root.title('NYX660 param_tune ツール')
+        root.geometry('980x860')
+        root.minsize(760, 520)
 
         self.cfg = load_config()
-        self.profile_path = self.cfg['camera'].get('params_json')
-        self.profile_baseline = load_profile_baseline(self.profile_path) if self.profile_path else {}
-        self.fps = int(self.cfg['camera'].get('fps', 30))
-
-        # ユーザー編集を保持する作業コピー（プロファイル既定値で初期化）
-        self.baseline_values = dict(self.profile_baseline)
-        self.baseline_entries = {}  # name -> Entry（現在表示中のものだけ）
-        self.sweep_rows = []        # [{'frame','param_var','values_var','preview_var',...}, ...]
-
-        self.display_to_name = {_display_for(n): n for n in PARAM_META}
-        self.name_to_display = {n: d for d, n in self.display_to_name.items()}
+        self.param_tune_dir = self.cfg['output']['param_tune_dir']
 
         self.proc = None
         self.log_queue = queue.Queue()
+        self._on_done_callback = None
 
-        self._build_widgets()
-        self._add_sweep_row()
+        self._build_shell()
+        SweepTab(self.tab_sweep, self)
+        DetectEvalTab(self.tab_detect, self)
+        HdrComposeTab(self.tab_hdr, self)
+
         self.root.after(100, self._poll_log_queue)
 
     # ------------------------------------------------------------------ UI
 
-    def _build_widgets(self):
-        # 振るパラメータ・基準値の行はヒント表示のぶん縦に伸びやすく、パラメータ数が
-        # 増えるとウィンドウ高さを超えて操作できなくなるため、可変長の設定部分だけを
-        # スクロール領域にする。実行ボタンとログは常にウィンドウ下部に固定表示する
-        # （下から先にpackすることで、スクロール領域が残り空間を占めるようにしている）。
+    def _build_shell(self):
         btn_frame = ttk.Frame(self.root, padding=8)
         btn_frame.pack(side='bottom', fill='x')
-        ttk.Button(btn_frame, text="設定を保存", command=lambda: self.on_save(start=False)).pack(side='left')
-        self.start_button = ttk.Button(btn_frame, text="保存して撮影開始", command=lambda: self.on_save(start=True))
-        self.start_button.pack(side='left', padx=(8, 0))
-        self.abort_button = ttk.Button(btn_frame, text="強制終了", command=self._abort, state='disabled')
-        self.abort_button.pack(side='left', padx=(8, 0))
+        self.abort_button = ttk.Button(btn_frame, text="実行中の処理を強制終了", command=self._abort, state='disabled')
+        self.abort_button.pack(side='left')
+        self.status_var = tk.StringVar(value='待機中')
+        ttk.Label(btn_frame, textvariable=self.status_var, foreground='gray').pack(side='left', padx=(8, 0))
 
-        log_frame = ttk.LabelFrame(self.root, text="実行ログ", padding=4)
+        log_frame = ttk.LabelFrame(self.root, text="実行ログ（撮影・検出集計・HDR合成で共有）", padding=4)
         log_frame.pack(side='bottom', fill='x', padx=8, pady=(0, 8))
         self.log_widget = tk.Text(log_frame, height=10, state='disabled', wrap='word')
         self.log_widget.pack(fill='both', expand=True, side='left')
@@ -92,7 +133,105 @@ class ParamSweepGUI:
         log_scroll.pack(fill='y', side='right')
         self.log_widget['yscrollcommand'] = log_scroll.set
 
-        scroll_outer = ttk.Frame(self.root)
+        notebook = ttk.Notebook(self.root)
+        notebook.pack(side='top', fill='both', expand=True, padx=8, pady=8)
+        self.tab_sweep  = ttk.Frame(notebook)
+        self.tab_detect = ttk.Frame(notebook)
+        self.tab_hdr    = ttk.Frame(notebook)
+        notebook.add(self.tab_sweep,  text='撮影 (param_sweep)')
+        notebook.add(self.tab_detect, text='検出集計 (detect_eval)')
+        notebook.add(self.tab_hdr,    text='HDR合成 (hdr_compose)')
+
+    # -------------------------------------------------------- process runner
+
+    def run_process(self, cmd, on_done=None):
+        """cmdをサブプロセスとして起動する。既に何か実行中なら警告して何もしない。
+        on_done(returncode) は完了時にメインスレッドから呼ばれる。
+        """
+        if self.proc is not None:
+            messagebox.showwarning('実行中', 'すでに他の処理が実行中です。終了を待つか強制終了してください。')
+            return False
+        self.log(f"起動: {' '.join(str(c) for c in cmd)}")
+        self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                      text=True, bufsize=1)
+        self._on_done_callback = on_done
+        self.abort_button.config(state='normal')
+        self.status_var.set('実行中...')
+        threading.Thread(target=self._read_proc_output, daemon=True).start()
+        return True
+
+    def _read_proc_output(self):
+        proc = self.proc
+        for line in proc.stdout:
+            self.log_queue.put(line.rstrip('\n'))
+        proc.wait()
+        self.log_queue.put(f"__DONE__{proc.returncode}")
+
+    def _poll_log_queue(self):
+        try:
+            while True:
+                line = self.log_queue.get_nowait()
+                if line.startswith('__DONE__'):
+                    code = line[len('__DONE__'):]
+                    self.log(f"--- 終了しました (code={code}) ---")
+                    self.proc = None
+                    self.abort_button.config(state='disabled')
+                    self.status_var.set('待機中')
+                    cb, self._on_done_callback = self._on_done_callback, None
+                    if cb:
+                        cb(code)
+                else:
+                    self.log(line)
+        except queue.Empty:
+            pass
+        self.root.after(100, self._poll_log_queue)
+
+    def _abort(self):
+        if self.proc is None:
+            return
+        self.proc.terminate()
+        self.log("強制終了を要求しました（未保存のまま終了する場合があります。"
+                  "撮影中ならプレビューウィンドウで[q]キーの方が安全です）")
+
+    def log(self, text):
+        self.log_widget.configure(state='normal')
+        self.log_widget.insert('end', text + '\n')
+        self.log_widget.see('end')
+        self.log_widget.configure(state='disabled')
+
+
+# ============================================================================
+# 撮影タブ（旧 ParamSweepGUI 相当。IR保存・中断セッションの再開を追加）
+# ============================================================================
+
+class SweepTab:
+    def __init__(self, parent, app):
+        self.app = app
+        self.cfg = app.cfg
+        self.profile_path = self.cfg['camera'].get('params_json')
+        self.profile_baseline = load_profile_baseline(self.profile_path) if self.profile_path else {}
+        self.fps = int(self.cfg['camera'].get('fps', 30))
+
+        self.baseline_values = dict(self.profile_baseline)
+        self.baseline_entries = {}
+        self.sweep_rows = []
+
+        self.display_to_name = {_display_for(n): n for n in PARAM_META}
+        self.name_to_display = {n: d for d, n in self.display_to_name.items()}
+
+        self._build_widgets(parent)
+        self._add_sweep_row()
+
+    # ------------------------------------------------------------------ UI
+
+    def _build_widgets(self, parent):
+        run_row = ttk.Frame(parent, padding=8)
+        run_row.pack(side='bottom', fill='x')
+        ttk.Button(run_row, text="設定を保存", command=lambda: self.on_save(start=False)).pack(side='left')
+        ttk.Button(run_row, text="保存して撮影開始", command=lambda: self.on_save(start=True))\
+            .pack(side='left', padx=(8, 0))
+
+        scroll_outer = ttk.Frame(parent)
         scroll_outer.pack(side='top', fill='both', expand=True)
         canvas = tk.Canvas(scroll_outer, highlightthickness=0)
         form_scroll = ttk.Scrollbar(scroll_outer, orient='vertical', command=canvas.yview)
@@ -204,6 +343,11 @@ class ParamSweepGUI:
             .grid(row=row, column=1, sticky='w', pady=3)
         row += 1
 
+        self.save_ir_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(form, text="IRフレーム(ir.png)も保存する（HDR合成での飽和判定用。--save-ir）",
+                         variable=self.save_ir_var).grid(row=row, column=1, sticky='w', pady=3)
+        row += 1
+
         self.auto_reference_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(form, text="Auto露光の参考撮影を含める（ToF/Color両方Auto、最初に1回のみ）",
                          variable=self.auto_reference_var).grid(row=row, column=1, sticky='w', pady=3)
@@ -213,6 +357,18 @@ class ParamSweepGUI:
         self.tag_var = tk.StringVar()
         ttk.Entry(form, textvariable=self.tag_var, width=30).grid(row=row, column=1, sticky='w', pady=3)
         row += 1
+
+        # --- 再開 ---
+        resume_outer = ttk.LabelFrame(scroll_frame, text="中断したスイープの再開（充電切れ等）", padding=8)
+        resume_outer.pack(fill='x', padx=8, pady=(4, 4))
+        self.resume_enabled_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(resume_outer, text="既存セッションを再開する（撮影済みの組み合わせは撮り直さずスキップ）",
+                         variable=self.resume_enabled_var).pack(anchor='w')
+        ttk.Label(resume_outer,
+                  text="※ 上の「振るパラメータ」「値」「タグ」は中断時と同じ内容を指定すること（組み合わせの再計算に必要）",
+                  foreground='gray', wraplength=880, justify='left').pack(anchor='w', pady=(0, 4))
+        self.resume_path_var = tk.StringVar()
+        _add_session_picker(resume_outer, self.resume_path_var, self.cfg['output']['param_tune_dir'])
 
         # --- 基準値（振らない他パラメータ） ---
         baseline_outer = ttk.LabelFrame(scroll_frame, text="基準値（振らないパラメータの固定値。空欄でSDK既定 = プロファイル値）",
@@ -248,9 +404,6 @@ class ParamSweepGUI:
             messagebox.showinfo('追加不可', '全パラメータが選択済みです。')
             return
 
-        # 1行目: パラメータ選択・値入力・削除ボタン
-        # 2行目: SDK範囲/推奨値のヒント・パース結果プレビュー
-        # （横に並べると欄が広くなりすぎるため2段組みにしている）
         row_frame = ttk.Frame(self.sweeps_container)
         row_frame.pack(fill='x', pady=(2, 6))
 
@@ -412,8 +565,6 @@ class ParamSweepGUI:
                 .grid(row=r, column=2, sticky='w', padx=6, pady=(4, 0))
             self.baseline_entries[name] = entry
             r += 1
-            # SDK側の範囲・目安（実測値と分けて表示。行を分けているのは、
-            # 生プロファイル値と混同しないよう視覚的に区別するため）
             ttk.Label(self.baseline_frame, text=meta['hint'], foreground='#0a6',
                       wraplength=760, justify='left').grid(row=r, column=0, columnspan=3,
                                                             sticky='w', padx=2, pady=(0, 4))
@@ -443,6 +594,10 @@ class ParamSweepGUI:
 
         baseline_overrides = {k: v for k, v in self.baseline_values.items() if k not in names}
 
+        resume = None
+        if self.resume_enabled_var.get():
+            resume = self.resume_path_var.get().strip() or 'latest'
+
         return {
             'sweeps': sweeps_cfg,
             'combine': combine,
@@ -452,9 +607,11 @@ class ParamSweepGUI:
             'warmup_frames': int(self.warmup_var.get()),
             'pause': float(self.pause_var.get()),
             'pointcloud': bool(self.pointcloud_var.get()),
+            'save_ir': bool(self.save_ir_var.get()),
             'auto_reference': bool(self.auto_reference_var.get()),
             'tag': self.tag_var.get().strip() or None,
             'baseline_overrides': baseline_overrides,
+            'resume': resume,
             'generated_at': datetime.now().isoformat(timespec='seconds'),
             'profile': self.profile_path,
         }
@@ -472,65 +629,174 @@ class ParamSweepGUI:
         path = CONFIG_DIR / f"{ts}_{param_tag}.json"
         with open(path, 'w') as f:
             json.dump(config, f, indent=2, ensure_ascii=False)
-        self._log(f"設定を保存しました: {path}")
+        self.app.log(f"設定を保存しました: {path}")
 
         if start:
-            self._start_capture(path)
+            cmd = [sys.executable, str(SWEEP_SCRIPT), '--config', str(path)]
+            self.app.run_process(cmd)
 
-    def _start_capture(self, config_path):
-        if self.proc is not None:
-            messagebox.showwarning('実行中', 'すでに撮影が実行中です。')
+
+# ============================================================================
+# 検出集計タブ
+# ============================================================================
+
+class DetectEvalTab:
+    def __init__(self, parent, app):
+        self.app = app
+        form = ttk.Frame(parent, padding=8)
+        form.pack(fill='both', expand=True)
+
+        ttk.Label(form, text="detect_eval.py でセッションディレクトリのYOLO検出を集計する。",
+                  foreground='gray', wraplength=880, justify='left').pack(anchor='w')
+
+        session_outer = ttk.LabelFrame(form, text="対象セッション（空欄なら最新セッションを自動選択）", padding=8)
+        session_outer.pack(fill='x', pady=(8, 4))
+        self.session_var = tk.StringVar()
+        _add_session_picker(session_outer, self.session_var, app.param_tune_dir)
+
+        opt_frame = ttk.Frame(form)
+        opt_frame.pack(fill='x', pady=(4, 4))
+        opt_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(opt_frame, text="モデル（空欄でconfig.yamlの既定）").grid(row=0, column=0, sticky='w', pady=3)
+        model_row = ttk.Frame(opt_frame)
+        model_row.grid(row=0, column=1, sticky='we')
+        self.model_var = tk.StringVar()
+        ttk.Entry(model_row, textvariable=self.model_var, width=50).pack(side='left', fill='x', expand=True)
+
+        def _browse_model():
+            f = filedialog.askopenfilename(initialdir=str(SCRIPT_DIR.parent.parent / 'nyx660_script' / 'model'),
+                                            filetypes=[('YOLO model', '*.pt'), ('All files', '*.*')])
+            if f:
+                self.model_var.set(f)
+
+        ttk.Button(model_row, text='参照...', command=_browse_model).pack(side='left', padx=(4, 0))
+
+        ttk.Label(opt_frame, text="信頼度閾値（空欄でconfig.yamlの既定）").grid(row=1, column=0, sticky='w', pady=3)
+        self.conf_var = tk.StringVar()
+        ttk.Entry(opt_frame, textvariable=self.conf_var, width=10).grid(row=1, column=1, sticky='w', pady=3)
+
+        ttk.Button(form, text="検出集計を実行", command=self._run).pack(anchor='w', pady=(8, 0))
+
+    def _run(self):
+        cmd = [sys.executable, str(DETECT_EVAL_SCRIPT)]
+        session = self.session_var.get().strip()
+        if session:
+            cmd.append(session)
+        model = self.model_var.get().strip()
+        if model:
+            cmd += ['--model', model]
+        conf = self.conf_var.get().strip()
+        if conf:
+            try:
+                float(conf)
+            except ValueError:
+                messagebox.showerror('入力エラー', '信頼度閾値は数値で指定してください')
+                return
+            cmd += ['--conf', conf]
+        self.app.run_process(cmd)
+
+
+# ============================================================================
+# HDR合成タブ
+# ============================================================================
+
+class HdrComposeTab:
+    def __init__(self, parent, app):
+        self.app = app
+        form = ttk.Frame(parent, padding=8)
+        form.pack(fill='both', expand=True)
+
+        ttk.Label(form,
+                  text="hdr_compose.py で、同一の静止シーンを露光違いで撮影した複数のdepth(+IR)を"
+                       "画素ごとに合成する。撮影は「撮影」タブで対象パラメータの値を振り、"
+                       "ir_awareモードを使うなら「IRフレームも保存する」を有効にしておくこと。",
+                  foreground='gray', wraplength=880, justify='left').pack(anchor='w')
+
+        session_outer = ttk.LabelFrame(form, text="対象セッション（露光を振って撮影したセッション）", padding=8)
+        session_outer.pack(fill='x', pady=(8, 4))
+        self.session_var = tk.StringVar()
+        _add_session_picker(session_outer, self.session_var, app.param_tune_dir)
+
+        opt_frame = ttk.Frame(form)
+        opt_frame.pack(fill='x', pady=(4, 4))
+        opt_frame.columnconfigure(1, weight=1)
+        r = 0
+
+        ttk.Label(opt_frame, text="対象パラメータ").grid(row=r, column=0, sticky='w', pady=3)
+        exposure_params = [n for n in PARAM_META
+                            if n in ('tof_exposure', 'color_exposure', 'color_aec_max_exposure_time')]
+        self.display_to_name = {_display_for(n): n for n in exposure_params}
+        self.param_var = tk.StringVar(value=_display_for('tof_exposure'))
+        ttk.Combobox(opt_frame, textvariable=self.param_var, state='readonly', width=32,
+                     values=list(self.display_to_name.keys())).grid(row=r, column=1, sticky='w', pady=3)
+        r += 1
+
+        ttk.Label(opt_frame, text="合成する値（1000,3000,5000 または 1000:8000:1000）")\
+            .grid(row=r, column=0, sticky='w', pady=3)
+        self.values_var = tk.StringVar()
+        ttk.Entry(opt_frame, textvariable=self.values_var, width=40).grid(row=r, column=1, sticky='w', pady=3)
+        r += 1
+
+        ttk.Label(opt_frame, text="合成モード").grid(row=r, column=0, sticky='w', pady=3)
+        mode_frame = ttk.Frame(opt_frame)
+        mode_frame.grid(row=r, column=1, sticky='w')
+        self.mode_var = tk.StringVar(value='first_valid')
+        ttk.Radiobutton(mode_frame, text='first_valid（短い露光を優先）', variable=self.mode_var,
+                         value='first_valid', command=self._on_mode_changed).pack(side='left')
+        ttk.Radiobutton(mode_frame, text='ir_aware（IR飽和を除外、要--save-ir）', variable=self.mode_var,
+                         value='ir_aware', command=self._on_mode_changed).pack(side='left', padx=(12, 0))
+        r += 1
+
+        ttk.Label(opt_frame, text="IR飽和しきい値（0-255）").grid(row=r, column=0, sticky='w', pady=3)
+        self.ir_sat_var = tk.IntVar(value=250)
+        self.ir_sat_spin = ttk.Spinbox(opt_frame, from_=0, to=255, textvariable=self.ir_sat_var, width=6)
+        self.ir_sat_spin.grid(row=r, column=1, sticky='w', pady=3)
+        r += 1
+
+        ttk.Label(opt_frame, text="タグ（出力フォルダ名 hdr_compose_<tag>、空欄で時刻）")\
+            .grid(row=r, column=0, sticky='w', pady=3)
+        self.tag_var = tk.StringVar()
+        ttk.Entry(opt_frame, textvariable=self.tag_var, width=20).grid(row=r, column=1, sticky='w', pady=3)
+        r += 1
+
+        self._on_mode_changed()
+
+        ttk.Button(form, text="HDR合成を実行", command=self._run).pack(anchor='w', pady=(8, 0))
+
+    def _on_mode_changed(self):
+        self.ir_sat_spin.configure(state='normal' if self.mode_var.get() == 'ir_aware' else 'disabled')
+
+    def _run(self):
+        session = self.session_var.get().strip()
+        if not session:
+            messagebox.showerror('入力エラー', '対象セッションを指定してください')
             return
-        cmd = [sys.executable, str(SWEEP_SCRIPT), '--config', str(config_path)]
-        self._log(f"起動: {' '.join(cmd)}")
-        self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                      text=True, bufsize=1)
-        self.start_button.config(state='disabled')
-        self.abort_button.config(state='normal')
-        threading.Thread(target=self._read_proc_output, daemon=True).start()
-
-    def _read_proc_output(self):
-        proc = self.proc
-        for line in proc.stdout:
-            self.log_queue.put(line.rstrip('\n'))
-        proc.wait()
-        self.log_queue.put(f"__DONE__{proc.returncode}")
-
-    def _poll_log_queue(self):
+        values = self.values_var.get().strip()
+        if not values:
+            messagebox.showerror('入力エラー', '合成する値を指定してください（例: 1000,3000,5000）')
+            return
         try:
-            while True:
-                line = self.log_queue.get_nowait()
-                if line.startswith('__DONE__'):
-                    code = line[len('__DONE__'):]
-                    self._log(f"--- 終了しました (code={code}) ---")
-                    self.proc = None
-                    self.start_button.config(state='normal')
-                    self.abort_button.config(state='disabled')
-                else:
-                    self._log(line)
-        except queue.Empty:
-            pass
-        self.root.after(100, self._poll_log_queue)
-
-    def _abort(self):
-        if self.proc is None:
+            parse_values(values)
+        except Exception as e:
+            messagebox.showerror('入力エラー', f'値の形式が不正です: {e}')
             return
-        # プレビューウィンドウで[q]を押す通常終了と違い、metadata.json等が
-        # 保存されないまま強制終了する点に注意（可能なら[q]キーでの終了を推奨）
-        self.proc.terminate()
-        self._log("強制終了を要求しました（未保存のまま終了する場合があります。"
-                   "可能なら撮影ウィンドウで[q]キーを使ってください）")
 
-    def _log(self, text):
-        self.log_widget.configure(state='normal')
-        self.log_widget.insert('end', text + '\n')
-        self.log_widget.see('end')
-        self.log_widget.configure(state='disabled')
+        cmd = [sys.executable, str(HDR_COMPOSE_SCRIPT), session,
+               '--param', self.display_to_name[self.param_var.get()],
+               '--values', values,
+               '--mode', self.mode_var.get()]
+        if self.mode_var.get() == 'ir_aware':
+            cmd += ['--ir-saturation', str(self.ir_sat_var.get())]
+        tag = self.tag_var.get().strip()
+        if tag:
+            cmd += ['--tag', tag]
+        self.app.run_process(cmd)
 
 
 def main():
     root = tk.Tk()
-    ParamSweepGUI(root)
+    App(root)
     root.mainloop()
 
 

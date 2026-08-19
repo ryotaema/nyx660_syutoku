@@ -220,16 +220,46 @@ def find_resumable_session(param_tune_dir, dir_tag):
     return max(set(candidates), key=lambda d: d.stat().st_mtime)
 
 
-def session_has_result(vdir, dirname, pointcloud=False):
+def session_has_result(vdir, dirname, pointcloud=False, ir=False):
     """組み合わせディレクトリ vdir に、そのセッションで期待される撮影結果一式
-    （color/depth/depth_colormap、pointcloud指定時は.plyも）が既に揃っているか判定する。
-    再開時にどの組み合わせを撮り直さずスキップできるかの判定に使う。
+    （color/depth/depth_colormap、pointcloud指定時は.ply、ir指定時はir.pngも）が
+    既に揃っているか判定する。再開時にどの組み合わせを撮り直さずスキップできるかの判定に使う。
     """
     if not vdir.is_dir():
         return False
-    required = ['color', 'depth', 'depth_colormap'] + (['pointcloud'] if pointcloud else [])
+    required = (['color', 'depth', 'depth_colormap'] + (['pointcloud'] if pointcloud else [])
+                + (['ir'] if ir else []))
     exts = {'pointcloud': 'ply'}
     return all((vdir / result_filename(dirname, m, exts.get(m, 'png'))).exists() for m in required)
+
+
+def list_sessions(param_tune_dir, limit=100):
+    """param_tune_dir配下の全セッションディレクトリを更新日時の新しい順に返す
+    （GUIのセッション選択欄向け）。metadata.jsonの有無・撮影進捗を短い注記として
+    labelに含める（無ければ「中断の可能性」と分かるようにする）。
+    戻り値: [{'path': Path, 'label': str}, ...]
+    """
+    base = Path(param_tune_dir).expanduser()
+    if not base.is_dir():
+        return []
+    dirs = [d for d in base.glob('*/*') if d.is_dir()]
+    dirs.sort(key=lambda d: d.stat().st_mtime, reverse=True)
+
+    out = []
+    for d in dirs[:limit]:
+        meta_path = d / 'metadata.json'
+        note = '  (metadata.jsonなし・中断の可能性)'
+        if meta_path.exists():
+            try:
+                with open(meta_path) as f:
+                    meta = json.load(f)
+                results = meta.get('results', [])
+                n_saved = sum(1 for r in results if r.get('saved'))
+                note = f"  ({n_saved}/{len(results)}枚保存済み" + (', 中断' if meta.get('aborted') else '') + ')'
+            except (OSError, json.JSONDecodeError):
+                note = '  (metadata.json破損)'
+        out.append({'path': d, 'label': f"{d.parent.name}/{d.name}{note}"})
+    return out
 
 
 def _metadata_params(meta_path):
