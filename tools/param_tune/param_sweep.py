@@ -747,8 +747,17 @@ def _build_comparison_images(session_dir, results, names, combine, unit_map, aut
     saved = [r for r in results if r['saved']]
     if not saved:
         return
-    grid_shape, ordered = montage_grid_for_combos(saved, names, combine)
+    grid_shape, ordered, axis_info = montage_grid_for_combos(saved, names, combine)
     ordered_results = ordered if ordered is not None else saved
+
+    # パラメータ2個・直積の2次元グリッドの場合のみ、行/列見出し（値の昇順）を用意する。
+    # どこからどこまでが同じ行・同じ列かを一目で分かるようにするため（境目の視認性向上）。
+    row_labels = col_labels = row_axis_name = col_axis_name = None
+    if axis_info:
+        col_labels = [f"{v}{unit_map.get(axis_info['x_name'], '')}" for v in axis_info['x_values']]
+        row_labels = [f"{v}{unit_map.get(axis_info['y_name'], '')}" for v in axis_info['y_values']]
+        col_axis_name = axis_info['x_name']
+        row_axis_name = axis_info['y_name']
 
     ref_entry = None
     if auto_reference_result and auto_reference_result.get('saved'):
@@ -768,7 +777,9 @@ def _build_comparison_images(session_dir, results, names, combine, unit_map, aut
         out_path = session_dir / f'comparison_{modality}.png'
         # cv2.putTextはASCIIのみ描画可能（日本語は文字化けする）ため英語表記にする
         title = f"{modality} comparison - {', '.join(names)}"
-        if build_montage(tiles, out_path, title=title, grid_shape=grid_shape):
+        if build_montage(tiles, out_path, title=title, grid_shape=grid_shape,
+                          row_labels=row_labels, col_labels=col_labels,
+                          row_axis_name=row_axis_name, col_axis_name=col_axis_name):
             print(f"比較画像: {out_path}")
 
     if ref_entry and not prepended:

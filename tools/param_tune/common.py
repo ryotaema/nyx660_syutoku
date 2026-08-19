@@ -239,38 +239,55 @@ def find_result_file(vdir, dirname, modality, ext):
     return None
 
 
+def _sort_key(v):
+    """数値なら数値として、それ以外は文字列としてソートするためのキー。
+
+    sorted(..., key=str) だと "1000" と "200" のように桁数で文字列比較されてしまい
+    （"1000" < "200"）、比較画像（comparison_*.png）の並びが値の大小と一致せず
+    「ずれて見える」問題があったため（2026-08-19）。bool は float に変換できる
+    （True->1.0/False->0.0）ためそのまま数値として扱われる。
+    """
+    try:
+        return (0, float(v))
+    except (TypeError, ValueError):
+        return (1, str(v))
+
+
 def montage_grid_for_combos(results, names, combine=None, combo_key='combo'):
     """比較モンタージュ用のグリッド配置を決める。
 
-    - パラメータ1個: 値でソートした1行のグリッド（値が多すぎる場合はNoneであきらめて自動配置に委ねる）
-    - パラメータ2個 かつ combine=='product': (行=2個目の値, 列=1個目の値) の2次元グリッド
-      （detect_eval.py のヒートマップと軸の意味を揃えている）
+    - パラメータ1個: 値の大小でソートした1行のグリッド（値が多すぎる場合はNoneであきらめて自動配置に委ねる）
+    - パラメータ2個 かつ combine=='product': (行=2個目の値, 列=1個目の値) の2次元グリッド、
+      各軸とも値の大小順に整列する（detect_eval.py のヒートマップと軸の意味を揃えている）
     - それ以外（3個以上 or zip）: None を返す（呼び出し側は結果の並び順のまま自動グリッドにする）
 
     combo_key: 各要素から組み合わせdictを取り出すキー名。param_sweep.py の results は
     'combo'、detect_eval.py の rows は内部フィールド名が異なる（既定'_combo'相当）ため
     呼び出し側で指定できるようにしている。
 
-    戻り値: (grid_shape, ordered_results) または (None, None)。
+    戻り値: (grid_shape, ordered_results, axis_info)。
     ordered_results は results と同じ要素を並べ替えたリストで、対応する組み合わせが
-    無いセルは None が入る。
+    無いセルは None が入る。axis_info はパラメータ2個・直積の場合のみ
+    {'x_name', 'x_values', 'y_name', 'y_values'}（行/列ヘッダー描画用、値は整列済み昇順）、
+    それ以外は None。グリッドを組めない場合は (None, None, None)。
     """
     if len(names) == 1:
         name = names[0]
-        ordered = sorted(results, key=lambda r: str(r[combo_key][name]))
+        ordered = sorted(results, key=lambda r: _sort_key(r[combo_key][name]))
         if len(ordered) <= 12:
-            return (1, len(ordered)), ordered
-        return None, None
+            return (1, len(ordered)), ordered, None
+        return None, None, None
 
     if len(names) == 2 and combine == 'product':
         name_x, name_y = names
-        xs = sorted({r[combo_key][name_x] for r in results}, key=str)
-        ys = sorted({r[combo_key][name_y] for r in results}, key=str)
+        xs = sorted({r[combo_key][name_x] for r in results}, key=_sort_key)
+        ys = sorted({r[combo_key][name_y] for r in results}, key=_sort_key)
         index = {(r[combo_key][name_x], r[combo_key][name_y]): r for r in results}
         ordered = [index.get((x, y)) for y in ys for x in xs]
-        return (len(ys), len(xs)), ordered
+        axis_info = {'x_name': name_x, 'x_values': xs, 'y_name': name_y, 'y_values': ys}
+        return (len(ys), len(xs)), ordered, axis_info
 
-    return None, None
+    return None, None, None
 
 
 def with_reference_tile(ordered_results, grid_shape, ref_entry):
@@ -293,11 +310,19 @@ def with_reference_tile(ordered_results, grid_shape, ref_entry):
     return new_ordered, new_grid_shape, True
 
 
-def build_montage(tiles, out_path, title=None, grid_shape=None, thumb_width=None):
+def build_montage(tiles, out_path, title=None, grid_shape=None, thumb_width=None,
+                   row_labels=None, col_labels=None, row_axis_name=None, col_axis_name=None):
     """複数の画像を1枚のグリッド画像（コンタクトシート）にまとめて保存する。
 
     tiles: [(画像パス or ndarray or None, ラベル文字列), ...]（Noneは空セル）
     grid_shape: (rows, cols)。指定が無ければ枚数から正方形に近い形を自動算出する。
+
+    row_labels/col_labels: 2次元グリッド（パラメータ2個・直積、grid_shape の行数・列数と
+    それぞれ同じ個数）を渡すと、上端に列見出し・左端に行見出しの帯を追加で描画し、
+    どこからどこまでが同じ行・同じ列（=同じパラメータ値）かを一目で分かるようにする
+    （行数・列数どちらも2以上の場合のみ有効。個数が一致しない場合は無視する）。
+    row_axis_name/col_axis_name はその見出し帯の左上隅に表示するパラメータ名。
+
     戻り値: 保存できれば True、有効な画像が1枚も無ければ False。
     """
     n = len(tiles)
@@ -332,14 +357,50 @@ def build_montage(tiles, out_path, title=None, grid_shape=None, thumb_width=None
     tile_w = thumb_width
     title_h = 34 if title else 0
 
-    canvas = np.full((rows * tile_h + title_h, cols * tile_w, 3), 255, dtype=np.uint8)
+    # 行/列見出し帯（境目を分かりやすくするための軸ラベル）。行数・列数がともに2以上、
+    # かつラベル数が実際の行数・列数と一致する場合のみ描く（1次元グリッドやラベル未指定時は無し）。
+    has_axes = (rows > 1 and cols > 1
+                and row_labels is not None and col_labels is not None
+                and len(row_labels) == rows and len(col_labels) == cols)
+    col_header_h = 30 if has_axes else 0
+    row_header_w = 120 if has_axes else 0
+
+    canvas = np.full((rows * tile_h + title_h + col_header_h, cols * tile_w + row_header_w, 3),
+                      255, dtype=np.uint8)
     if title:
         cv2.putText(canvas, title, (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 0, 0), 1, cv2.LINE_AA)
+
+    if has_axes:
+        header_bg = (232, 232, 244)
+        header_border = (150, 150, 175)
+        # 列見出し（上端。各列＝col_axis_nameの値）
+        for c, clabel in enumerate(col_labels):
+            x0, y0 = row_header_w + c * tile_w, title_h
+            cv2.rectangle(canvas, (x0, y0), (x0 + tile_w - 1, y0 + col_header_h - 1), header_bg, -1)
+            cv2.putText(canvas, str(clabel), (x0 + 6, y0 + col_header_h - 9),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (20, 20, 20), 1, cv2.LINE_AA)
+            cv2.rectangle(canvas, (x0, y0), (x0 + tile_w - 1, y0 + col_header_h - 1), header_border, 1)
+        # 行見出し（左端。各行＝row_axis_nameの値）
+        for r, rlabel in enumerate(row_labels):
+            x0, y0 = 0, title_h + col_header_h + r * tile_h
+            cv2.rectangle(canvas, (x0, y0), (x0 + row_header_w - 1, y0 + tile_h - 1), header_bg, -1)
+            cv2.putText(canvas, str(rlabel), (x0 + 6, y0 + tile_h // 2 + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (20, 20, 20), 1, cv2.LINE_AA)
+            cv2.rectangle(canvas, (x0, y0), (x0 + row_header_w - 1, y0 + tile_h - 1), header_border, 1)
+        # 左上隅（行/列がそれぞれ何のパラメータかを示す）
+        corner_text = f"{row_axis_name or ''}\\{col_axis_name or ''}"
+        cv2.rectangle(canvas, (0, title_h), (row_header_w - 1, title_h + col_header_h - 1),
+                      (215, 215, 230), -1)
+        cv2.putText(canvas, corner_text[:16], (4, title_h + col_header_h - 9),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (60, 60, 60), 1, cv2.LINE_AA)
+        cv2.rectangle(canvas, (0, title_h), (row_header_w - 1, title_h + col_header_h - 1),
+                      header_border, 1)
 
     for idx in range(min(n, rows * cols)):
         img, label = imgs[idx]
         r, c = divmod(idx, cols)
-        y0, x0 = title_h + r * tile_h, c * tile_w
+        y0 = title_h + col_header_h + r * tile_h
+        x0 = row_header_w + c * tile_w
 
         cell = np.full((tile_h, tile_w, 3), 235, dtype=np.uint8)
         if img is not None:
