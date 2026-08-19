@@ -157,7 +157,10 @@ class Session:
     ディレクトリ名はファイル名の prefix に前方一致するので対応関係は保たれる。
     """
 
-    def __init__(self, base_dir, cam=CAM, tag=None, subdirs=(), started_at=None):
+    def __init__(self, base_dir, cam=CAM, tag=None, subdirs=(), started_at=None, dir=None):
+        """dir を指定すると、そのパスを既存セッションとしてそのまま使う（新規に
+        タイムスタンプ付きディレクトリを作らない）。中断した撮影を途中から
+        再開する場合など、既存ディレクトリに追記したいケース向け。"""
         self.started_at = started_at or datetime.now()
         self.cam    = cam
         self.tag    = tag
@@ -165,8 +168,11 @@ class Session:
         self.time   = self.started_at.strftime('%H%M%S')
         self.prefix = make_prefix(cam, self.started_at)
 
-        dir_name = f"{self.prefix}_{tag}" if tag else self.prefix
-        self.dir = Path(os.path.expanduser(str(base_dir))) / self.date / dir_name
+        if dir is not None:
+            self.dir = Path(os.path.expanduser(str(dir)))
+        else:
+            dir_name = f"{self.prefix}_{tag}" if tag else self.prefix
+            self.dir = Path(os.path.expanduser(str(base_dir))) / self.date / dir_name
         self.dir.mkdir(parents=True, exist_ok=True)
         for sub in subdirs:
             (self.dir / sub).mkdir(exist_ok=True)

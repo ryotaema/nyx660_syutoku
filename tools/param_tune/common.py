@@ -206,6 +206,32 @@ def find_latest_session(param_tune_dir, param=None):
     return metas[-1].parent
 
 
+def find_resumable_session(param_tune_dir, dir_tag):
+    """param_tune_dir配下から、dir_tag（パラメータ名を"+"で繋いだもの。tag付きなら
+    "<dir_tag>_<tag>"）に一致するセッションディレクトリのうち最後に更新されたものを返す。
+    metadata.jsonの有無は問わない（充電切れ等でプロセスが強制終了しmetadata.jsonが
+    書けなかったセッションも再開対象にするため）。見つからなければ None。
+    """
+    base = Path(param_tune_dir).expanduser()
+    candidates = [d for d in base.glob(f'*/*_{dir_tag}') if d.is_dir()]
+    candidates += [d for d in base.glob(f'*/*_{dir_tag}_*') if d.is_dir()]
+    if not candidates:
+        return None
+    return max(set(candidates), key=lambda d: d.stat().st_mtime)
+
+
+def session_has_result(vdir, dirname, pointcloud=False):
+    """組み合わせディレクトリ vdir に、そのセッションで期待される撮影結果一式
+    （color/depth/depth_colormap、pointcloud指定時は.plyも）が既に揃っているか判定する。
+    再開時にどの組み合わせを撮り直さずスキップできるかの判定に使う。
+    """
+    if not vdir.is_dir():
+        return False
+    required = ['color', 'depth', 'depth_colormap'] + (['pointcloud'] if pointcloud else [])
+    exts = {'pointcloud': 'ply'}
+    return all((vdir / result_filename(dirname, m, exts.get(m, 'png'))).exists() for m in required)
+
+
 def _metadata_params(meta_path):
     """metadata.json からスイープ対象パラメータ名の一覧を取り出す
     （新形式の 'params'/'sweeps' と、単一パラメータだった旧形式の 'param' の両方に対応）。

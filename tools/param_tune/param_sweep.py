@@ -57,6 +57,16 @@ detect_eval.py でYOLO検出結果を集計し、どの値・どの組み合わ�
     python3 tools/param_tune/param_sweep.py --param tof_exposure --values 1000,10000,50000 \\
         --fps 30 --auto-fps-adjust
 
+    # 充電切れ等で中断したスイープを途中から再開する（--param/--values or --configは
+    # 中断時と同じものを指定する。撮影済み（color/depth/depth_colormap一式が揃っている）
+    # 組み合わせは撮り直さずスキップする）
+    python3 tools/param_tune/param_sweep.py \\
+        --param color_exposure --values 500:3000:100 --param color_gain --values 1:15:1 \\
+        --resume latest
+    # 再開先のディレクトリを明示する場合
+    python3 tools/param_tune/param_sweep.py --config configs/xxx.json \\
+        --resume ../data/param_tune/260819/nyx_260819_122320_color_exposure+color_gain
+
 Auto参考撮影について:
     既定で、スイープ開始直前にToF・Color両方をAuto露光にして1枚だけ参考撮影する
     （auto_reference/ フォルダに保存）。カメラが自動調整で選ぶ露光値を基準として
@@ -118,6 +128,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / 'nyx660_s
 from common import (
     PARAM_META, parse_values, cast_value, combo_dirname, combo_label,
     result_filename, build_montage, montage_grid_for_combos, with_reference_tile,
+    find_resumable_session, session_has_result,
 )
 from utils import (
     load_config, build_parser, apply_args, init_sdk, open_camera, close_camera,
@@ -166,6 +177,13 @@ def _build_arg_parser():
                          '続行する（既定: OFF＝警告のみで続行し失敗する場合がある）')
     p.add_argument('--no-auto-fps-adjust', dest='auto_fps_adjust', action='store_false',
                     help='FPS自動調整をしない（既定の動作）')
+    p.add_argument('--resume', type=str, default=None, nargs='?', const='latest', metavar='DIR',
+                    help='中断したスイープを途中から再開する。既に撮影済み（color/depth/'
+                         'depth_colormap一式が揃っている）組み合わせは撮り直さずスキップする。'
+                         'DIRに既存セッションのディレクトリパスを指定するか、省略/"latest"で'
+                         'param_tune_dir配下から同じパラメータ組み合わせ（--param/--values or '
+                         '--config、--tagも一致）の最新セッションを自動で探す。--param/--values/'
+                         '--config は中断時と同じ内容を指定すること（組み合わせの再計算に必要）')
     p.add_argument('--list', action='store_true',
                     help='調整可能なパラメータの一覧を表示して終了する')
     return p
@@ -516,8 +534,21 @@ def main():
     depth_alpha = cfg['camera'].get('depth_alpha', 0.4)
 
     dir_tag = "+".join(names) if not user_tag else f"{'+'.join(names)}_{user_tag}"
-    session = Session(cfg['output']['param_tune_dir'], tag=dir_tag)
-    print(f"保存先: {session.dir}")
+
+    resume_dir = None
+    if args.resume:
+        if args.resume == 'latest':
+            resume_dir = find_resumable_session(cfg['output']['param_tune_dir'], dir_tag)
+            if resume_dir is None:
+                parser.error(f"--resume latest: パラメータ組み合わせ「{dir_tag}」に一致する"
+                              "既存セッションが見つかりませんでした")
+        else:
+            resume_dir = Path(args.resume).expanduser()
+            if not resume_dir.is_dir():
+                parser.error(f"--resume: ディレクトリが見つかりません: {resume_dir}")
+
+    session = Session(cfg['output']['param_tune_dir'], tag=dir_tag, dir=resume_dir)
+    print(f"保存先: {session.dir}" + ("（再開）" if resume_dir else ""))
     print(f"パラメータ: {[(n, param_specs[n]['label']) for n in names]}")
     print(f"組み合わせ数: {len(combos)}（combine={combine}）")
     print(f"モード: {mode}  warmup: {warmup_frames}フレーム  点群: {'ON' if pointcloud else 'OFF'}"
@@ -582,6 +613,10 @@ def main():
         撮影後は変更前のexposure control mode/exposure timeに戻す
         （このあとのスイープ本体に影響を与えないため）。
         """
+        if resume_dir and session_has_result(session.dir / 'auto_reference', 'auto_reference', pointcloud):
+            print("  Auto参考撮影: 既存の結果を再利用します（再開のためスキップ）")
+            return {'dirname': 'auto_reference', 'actual': None, 'saved': True}
+
         prev_tof_mode = cam.scGetExposureControlMode(ScSensorType.SC_TOF_SENSOR)[1]
         prev_tof_exp = cam.scGetExposureTime(ScSensorType.SC_TOF_SENSOR)[1]
         prev_color_mode = cam.scGetExposureControlMode(ScSensorType.SC_COLOR_SENSOR)[1]
@@ -638,7 +673,17 @@ def main():
             auto_reference_result = capture_auto_reference()
 
         for combo in combos:
-            combo_casted = {name: apply_param(cam, name, value) for name, value in combo.items()}
+            combo_casted = {name: cast_value(name, value) for name, value in combo.items()}
+            vdir = session.dir / combo_dirname(combo_casted)
+
+            if resume_dir and session_has_result(vdir, vdir.name, pointcloud):
+                results.append({'combo': combo_casted, 'actual': combo_casted, 'saved': True,
+                                 'dirname': vdir.name, 'fps': fps_state['fps'], 'resumed': True})
+                print(f"  スキップ（既存）: {combo_label(combo_casted, unit_map)} → {vdir.name}/")
+                continue
+
+            for name, value in combo.items():
+                apply_param(cam, name, value)
 
             attempts = 0
             warm = 0
@@ -649,7 +694,6 @@ def main():
 
             actual = {name: param_specs[name]['getter'](cam) for name in combo_casted}
             match = all(str(combo_casted[n]) == str(actual[n]) for n in combo_casted)
-            vdir = session.dir / combo_dirname(combo_casted)
             label = combo_label(combo_casted, unit_map)
             actual_label = combo_label(actual, unit_map)
 
@@ -723,12 +767,16 @@ def main():
             config_file=args.config,
             auto_reference=auto_reference_result,
             aborted=aborted,
+            resumed_from=str(resume_dir) if resume_dir else None,
             results=results,
         )
         close_camera(cam)
         cv2.destroyAllWindows()
         n_saved = sum(1 for r in results if r['saved'])
+        n_resumed = sum(1 for r in results if r.get('resumed'))
         print(f"\n完了: {n_saved}/{len(combos)} 通りを保存 → {session.dir}")
+        if n_resumed:
+            print(f"（うち{n_resumed}通りは再開により既存結果を再利用してスキップ）")
         if fps_state['fps'] != cfg['camera'].get('fps'):
             print(f"注意: FPS自動調整により、最終的なFPSは{cfg['camera'].get('fps')}から"
                   f"{fps_state['fps']}まで下がっています（metadata.jsonのcamera.fps_finalに記録）")
