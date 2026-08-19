@@ -197,6 +197,28 @@ def _build_combos(sweep_specs, combine, parser):
     return [dict(zip(names, vals)) for vals in itertools.product(*(s['values'] for s in sweep_specs))]
 
 
+def _warn_exposure_range(cam, sweep_specs, ScSensorType):
+    """tof_exposure/color_exposureが振られている場合、現在のFPSでの実機上限
+    （scGetMaxExposureTime）を超える要求値がないか撮影前にチェックして警告する。
+    露光上限はFPS依存でSDK非公開のため、大量の組み合わせが軒並み-105
+    (SC_CMD_SYNC_TIME_OUT)で失敗してから気づく、という事態を避けるためのもの。
+    """
+    sensor_for = {'tof_exposure': ScSensorType.SC_TOF_SENSOR, 'color_exposure': ScSensorType.SC_COLOR_SENSOR}
+    for s in sweep_specs:
+        sensor = sensor_for.get(s['param'])
+        if sensor is None:
+            continue
+        ret, max_us = cam.scGetMaxExposureTime(sensor)
+        if ret != 0:
+            continue
+        print(f"  {s['param']}: 現在のFPSでの実機露光上限 ≈ {max_us}us")
+        over = [v for v in s['values'] if isinstance(v, (int, float)) and v > max_us]
+        if over:
+            print(f"    警告: 上限を超える要求値があります（撮影は続行しますが失敗します）: {over}")
+            print(f"          上限はFPSに依存します。長い露光が必要な場合は --fps でフレームレートを"
+                  f"下げてから再実行してください（例: FPS 30→5 で上限がおよそ6倍に広がります）")
+
+
 def main():
     parser = _build_arg_parser()
     args = parser.parse_args()
@@ -240,7 +262,17 @@ def main():
     from ctypes import c_uint16, c_int32, c_uint8, c_float, c_bool
 
     def _check(name, ret):
-        if ret != 0:
+        if ret == 0:
+            return
+        if ret == -105:
+            # SC_CMD_SYNC_TIME_OUT: コマンド自体は受理されたが確認応答がタイムアウト。
+            # 露光時間設定でよく起きるのは、現在のFPSで実現できる上限を超える値を
+            # 要求した場合（device側が値を確定できず応答が返らない）。この場合、
+            # 実機の値は変更前のまま（クランプ）されることが多い（実機確認済み）。
+            print(f"警告: {name} failed: -105 (SC_CMD_SYNC_TIME_OUT: 確認応答タイムアウト。"
+                  "露光時間の場合は現在のFPSでの上限を超えた値を要求している可能性が高い。"
+                  "--fps を下げると上限が上がる)")
+        else:
             print(f"警告: {name} failed: {ret}")
 
     def _ensure_manual(cam, sensor_type, label):
@@ -402,6 +434,8 @@ def main():
         sys.exit(1)
 
     save_intrinsics(cam, str(session.dir))
+
+    _warn_exposure_range(cam, sweep_specs, ScSensorType)
 
     for bname, bvalue in baseline_overrides.items():
         if bname in names:

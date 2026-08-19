@@ -39,13 +39,17 @@ PARAM_META = {
     'tof_exposure': {
         'label': 'ToF露光時間', 'unit': 'us', 'type': 'int',
         'json_section': 'ExposureTime', 'json_key': 'ToF_ExposureTime',
-        'hint': 'SDK下限:約58us / 上限:機種・FPS依存(SDK非公開) / プロファイル既定:3000us',
+        'hint': 'SDK下限:約58us / 上限:FPS依存で動的に決まる(SDK非公開の固定値ではない。'
+                '目安: FPS30で約3万us、長い露光が要るなら--fpsを下げる) / プロファイル既定:3000us '
+                '/ 上限超え要求は-105(SC_CMD_SYNC_TIME_OUT)で失敗し前の値のままクランプされる(実機確認済み)',
     },
     'color_exposure': {
         'label': 'Color露光時間', 'unit': 'us', 'type': 'int',
         'json_section': 'ExposureTime', 'json_key': 'Color_ExposureTime',
-        'hint': 'SDK下限:100us / 上限:機種依存(SDK非公開) / 実機確認: 極端に小さい値は無視され'
-                'クランプされる場合あり(例:1〜5us→32000us) / プロファイル既定:3000us(通常はAuto運用)',
+        'hint': 'SDK下限:100us / 上限:FPS依存で動的に決まる(SDK非公開の固定値ではない。'
+                '目安: FPS30で約3.2万us、長い露光が要るなら--fpsを下げる) / プロファイル既定:3000us(通常はAuto運用) '
+                '/ 上限超え要求は-105(SC_CMD_SYNC_TIME_OUT)で失敗し前の値のままクランプされる(実機確認済み。'
+                '例:196000〜200000us要求→32000usのまま)',
     },
     'color_gain': {
         'label': 'Colorゲイン', 'unit': '', 'type': 'float',
@@ -55,7 +59,7 @@ PARAM_META = {
     'color_aec_max_exposure_time': {
         'label': 'Color自動露光の上限', 'unit': 'us', 'type': 'int',
         'json_section': None, 'json_key': None,
-        'hint': 'SDK下限:100us / 上限:機種依存(SDK非公開) / SDKサンプル例:3000us',
+        'hint': 'SDK下限:100us / 上限:FPS依存で動的に決まる(color_exposureと同じ制約) / SDKサンプル例:3000us',
     },
     'time_filter_threshold': {
         'label': '時間フィルタ閾値', 'unit': '', 'type': 'int',
