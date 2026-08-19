@@ -15,6 +15,10 @@ SDK初期化後でないと構築できないため param_sweep.py 側で組み�
   ColorPixelFormat・DHCP/IP/SubnetMask・SoftwareTrigger・HWTrigger・
   TransformColorImgToDepthSensorEnabled等（アライン） — 画質パラメータではないため
     （アラインは dataset_point_collect.py --align が別途担当）
+  FrameRate（FPS） — スイープ対象ではなく撮影条件（mode/warmup_frames等と同じ枠）
+    として扱う。param_sweep_gui.py の基準FPSプルダウン・FPS自動調整トグル、
+    param_sweep.py の --fps / --auto-fps-adjust を参照
+    （露光上限がFPS依存のため。詳細はtof_exposure/color_exposureのhint参照）
 """
 
 import json
@@ -39,13 +43,17 @@ PARAM_META = {
     'tof_exposure': {
         'label': 'ToF露光時間', 'unit': 'us', 'type': 'int',
         'json_section': 'ExposureTime', 'json_key': 'ToF_ExposureTime',
-        'hint': 'SDK下限:約58us / 上限:機種・FPS依存(SDK非公開) / プロファイル既定:3000us',
+        'hint': 'SDK下限:約58us / 上限:FPS依存で動的に決まる(SDK非公開の固定値ではない。'
+                '目安: FPS30で約3万us、長い露光が要るなら--fpsを下げる) / プロファイル既定:3000us '
+                '/ 上限超え要求は-105(SC_CMD_SYNC_TIME_OUT)で失敗し前の値のままクランプされる(実機確認済み)',
     },
     'color_exposure': {
         'label': 'Color露光時間', 'unit': 'us', 'type': 'int',
         'json_section': 'ExposureTime', 'json_key': 'Color_ExposureTime',
-        'hint': 'SDK下限:100us / 上限:機種依存(SDK非公開) / 実機確認: 極端に小さい値は無視され'
-                'クランプされる場合あり(例:1〜5us→32000us) / プロファイル既定:3000us(通常はAuto運用)',
+        'hint': 'SDK下限:100us / 上限:FPS依存で動的に決まる(SDK非公開の固定値ではない。'
+                '目安: FPS30で約3.2万us、長い露光が要るなら--fpsを下げる) / プロファイル既定:3000us(通常はAuto運用) '
+                '/ 上限超え要求は-105(SC_CMD_SYNC_TIME_OUT)で失敗し前の値のままクランプされる(実機確認済み。'
+                '例:196000〜200000us要求→32000usのまま)',
     },
     'color_gain': {
         'label': 'Colorゲイン', 'unit': '', 'type': 'float',
@@ -55,7 +63,7 @@ PARAM_META = {
     'color_aec_max_exposure_time': {
         'label': 'Color自動露光の上限', 'unit': 'us', 'type': 'int',
         'json_section': None, 'json_key': None,
-        'hint': 'SDK下限:100us / 上限:機種依存(SDK非公開) / SDKサンプル例:3000us',
+        'hint': 'SDK下限:100us / 上限:FPS依存で動的に決まる(color_exposureと同じ制約) / SDKサンプル例:3000us',
     },
     'time_filter_threshold': {
         'label': '時間フィルタ閾値', 'unit': '', 'type': 'int',

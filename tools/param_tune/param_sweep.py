@@ -53,12 +53,27 @@ detect_eval.py でYOLO検出結果を集計し、どの値・どの組み合わ�
     # Auto参考撮影（既定でON）を省略する場合
     python3 tools/param_tune/param_sweep.py --param tof_exposure --values 1000,3000,5000 --no-auto-reference
 
+    # 露光時間の要求値がFPS上限を超える場合、自動でFPSを下げながら撮影を続ける
+    python3 tools/param_tune/param_sweep.py --param tof_exposure --values 1000,10000,50000 \\
+        --fps 30 --auto-fps-adjust
+
 Auto参考撮影について:
     既定で、スイープ開始直前にToF・Color両方をAuto露光にして1枚だけ参考撮影する
     （auto_reference/ フォルダに保存）。カメラが自動調整で選ぶ露光値を基準として
     手動で振った値と見比べるための参考データで、撮影は1回のみ（スイープはしない）。
     撮影後は元のexposure control mode/露光時間に戻してからスイープ本体を開始する。
     --no-auto-reference で無効化できる。
+
+FPS自動調整について（--auto-fps-adjust / GUIの「FPS自動調整」トグル）:
+    tof_exposure/color_exposure/color_aec_max_exposure_time の要求値が現在のFPSでの
+    実機露光上限（scGetMaxExposureTime、FPS依存でSDK非公開）を超える場合、既定では
+    警告を出すだけで撮影を続行し、-105(SC_CMD_SYNC_TIME_OUT)で失敗する。
+    このフラグを有効にすると、超過を検知した時点でストリームを一旦止めてFPSを
+    30→25→20→15→10→6→5→3→2→1 の順に段階的に下げて再開し、値が上限に収まる
+    FPSまで自動的に下げてから撮影を続ける。一度下げたFPSはスイープ終了まで
+    そのままにする（露光値は昇順で振ることが多く、都度上げ下げしてストリームを
+    再起動するより効率的なため）。基準FPSは --fps（GUIではプルダウン、15 or 30）
+    で指定する。
 
 GUIでの設定:
     python3 tools/param_tune/param_sweep_gui.py
@@ -109,6 +124,14 @@ from utils import (
     extract_depth, extract_color, make_depth_colormap, save_ply, save_intrinsics, Session,
 )
 
+# FPS自動調整（--auto-fps-adjust）で段階的に下げていく候補（降順）。
+# 露光上限の目安（プロファイル既定FPS=30）: tof≈3万us、color≈3.2万us
+# （common.py の tof_exposure/color_exposure の hint 参照。FPSを下げるとおよそ反比例して広がる）。
+_FPS_LADDER = [30, 25, 20, 15, 10, 6, 5, 3, 2, 1]
+
+# FPS自動調整の対象となるパラメータ名と、対応するSensorType（main()内で解決）。
+_EXPOSURE_LIMIT_PARAMS = ('tof_exposure', 'color_exposure', 'color_aec_max_exposure_time')
+
 
 def _build_arg_parser():
     p = build_parser()
@@ -137,6 +160,12 @@ def _build_arg_parser():
                     help='ToF/Color両方をAuto露光にした参考撮影を最初に1回だけ追加する（既定: ON）')
     p.add_argument('--no-auto-reference', dest='auto_reference', action='store_false',
                     help='Auto露光の参考撮影を行わない')
+    p.add_argument('--auto-fps-adjust', dest='auto_fps_adjust', action='store_true', default=None,
+                    help='露光値(tof_exposure/color_exposure/color_aec_max_exposure_time)が'
+                         '現在のFPSでの上限を超える場合、撮影を止めずにFPSを段階的に下げてから'
+                         '続行する（既定: OFF＝警告のみで続行し失敗する場合がある）')
+    p.add_argument('--no-auto-fps-adjust', dest='auto_fps_adjust', action='store_false',
+                    help='FPS自動調整をしない（既定の動作）')
     p.add_argument('--list', action='store_true',
                     help='調整可能なパラメータの一覧を表示して終了する')
     return p
@@ -197,6 +226,35 @@ def _build_combos(sweep_specs, combine, parser):
     return [dict(zip(names, vals)) for vals in itertools.product(*(s['values'] for s in sweep_specs))]
 
 
+def _warn_exposure_range(cam, sweep_specs, ScSensorType, auto_fps_adjust):
+    """tof_exposure/color_exposureが振られている場合、現在のFPSでの実機上限
+    （scGetMaxExposureTime）を超える要求値がないか撮影前にチェックして警告する。
+    露光上限はFPS依存でSDK非公開のため、大量の組み合わせが軒並み-105
+    (SC_CMD_SYNC_TIME_OUT)で失敗してから気づく、という事態を避けるためのもの。
+    auto_fps_adjust が有効な場合は実際に撮影中にFPSを下げて対応するため、
+    ここでは「失敗する」ではなく「自動調整される」という告知に変える。
+    """
+    sensor_for = {'tof_exposure': ScSensorType.SC_TOF_SENSOR, 'color_exposure': ScSensorType.SC_COLOR_SENSOR}
+    for s in sweep_specs:
+        sensor = sensor_for.get(s['param'])
+        if sensor is None:
+            continue
+        ret, max_us = cam.scGetMaxExposureTime(sensor)
+        if ret != 0:
+            continue
+        print(f"  {s['param']}: 現在のFPSでの実機露光上限 ≈ {max_us}us")
+        over = [v for v in s['values'] if isinstance(v, (int, float)) and v > max_us]
+        if over:
+            if auto_fps_adjust:
+                print(f"    情報: 上限を超える要求値があります: {over}"
+                      f"（FPS自動調整が有効なので、撮影中に該当する値でFPSを段階的に下げます）")
+            else:
+                print(f"    警告: 上限を超える要求値があります（撮影は続行しますが失敗します）: {over}")
+                print(f"          上限はFPSに依存します。長い露光が必要な場合は --fps でフレームレートを"
+                      f"下げてから再実行するか、--auto-fps-adjust（GUIなら「FPS自動調整」トグル）を"
+                      f"有効にしてください（例: FPS 30→5 で上限がおよそ6倍に広がります）")
+
+
 def main():
     parser = _build_arg_parser()
     args = parser.parse_args()
@@ -220,6 +278,8 @@ def main():
     pause          = args.pause if args.pause is not None else float(file_cfg.get('pause', 0.3))
     pointcloud     = args.pointcloud or bool(file_cfg.get('pointcloud', False))
     auto_reference = args.auto_reference if args.auto_reference is not None else bool(file_cfg.get('auto_reference', True))
+    auto_fps_adjust = args.auto_fps_adjust if args.auto_fps_adjust is not None \
+        else bool(file_cfg.get('auto_fps_adjust', False))
     user_tag       = args.tag or file_cfg.get('tag')
     baseline_overrides = file_cfg.get('baseline_overrides') or {}
 
@@ -230,6 +290,11 @@ def main():
     if len(combos) > 50:
         print(f"警告: {len(combos)} 通りの組み合わせを撮影します。時間がかかる場合があります。")
 
+    # --config の 'fps'（GUIの基準FPSプルダウン）は --fps より優先度は低い
+    # （CLI引数が明示されていれば常にCLI優先、という他の設定項目と同じ規則）。
+    if args.fps is None and file_cfg.get('fps') is not None:
+        args.fps = int(file_cfg['fps'])
+
     cfg = apply_args(load_config(), args)
     init_sdk(cfg)
 
@@ -239,8 +304,22 @@ def main():
     )
     from ctypes import c_uint16, c_int32, c_uint8, c_float, c_bool
 
+    # 実際に適用中のFPS（auto_fps_adjustで下げていくと変わる）。
+    # dictにしているのはネストした関数から書き換えるため（nonlocalの代替）。
+    fps_state = {'fps': int(cfg['camera'].get('fps', 30))}
+
     def _check(name, ret):
-        if ret != 0:
+        if ret == 0:
+            return
+        if ret == -105:
+            # SC_CMD_SYNC_TIME_OUT: コマンド自体は受理されたが確認応答がタイムアウト。
+            # 露光時間設定でよく起きるのは、現在のFPSで実現できる上限を超える値を
+            # 要求した場合（device側が値を確定できず応答が返らない）。この場合、
+            # 実機の値は変更前のまま（クランプ）されることが多い（実機確認済み）。
+            print(f"警告: {name} failed: -105 (SC_CMD_SYNC_TIME_OUT: 確認応答タイムアウト。"
+                  "露光時間の場合は現在のFPSでの上限を超えた値を要求している可能性が高い。"
+                  "--fps を下げると上限が上がる)")
+        else:
             print(f"警告: {name} failed: {ret}")
 
     def _ensure_manual(cam, sensor_type, label):
@@ -277,6 +356,49 @@ def main():
 
     def _get_color_aec_max_exposure(cam):
         return cam.scGetColorAECMaxExposureTime()[1]
+
+    def _ensure_exposure_fits(cam, sensor, value, label):
+        """value(us)が現在のFPSでの実機露光上限（scGetMaxExposureTime）を超える場合、
+        auto_fps_adjust が有効ならストリームを一旦止めてFPSを _FPS_LADDER に沿って
+        段階的に下げ、値が収まるところで再開する。無効ならログのみ（従来動作）。
+
+        FPSは一度下げたらスイープ終了までそのまま（元に戻さない）。露光値は昇順で
+        振ることが多く、都度上げ下げしてストリーム再起動を繰り返すより効率的なため。
+        """
+        ret, max_us = cam.scGetMaxExposureTime(sensor)
+        if ret != 0 or value <= max_us:
+            return
+        if not auto_fps_adjust:
+            print(f"警告: {label} {value}us は現在のFPS({fps_state['fps']})での実機上限"
+                  f"（≈{max_us}us）を超えています。撮影は続行しますが失敗する可能性があります"
+                  f"（--auto-fps-adjust で自動調整できます）")
+            return
+        for f in [x for x in _FPS_LADDER if x < fps_state['fps']]:
+            print(f"情報: {label} {value}us が現在のFPS({fps_state['fps']})での上限（≈{max_us}us）を"
+                  f"超えるため、FPSを{f}に下げて撮影を続けます")
+            ret = cam.scStopStream()
+            if ret != 0:
+                print(f"警告: scStopStream failed: {ret}（FPS変更を中止します）")
+                return
+            cam.scSetFrameRate(c_uint8(f))
+            ret = cam.scStartStream()
+            if ret != 0:
+                print(f"警告: scStartStream failed: {ret}（FPS変更を反映できませんでした）")
+                return
+            fps_state['fps'] = f
+            ret, max_us = cam.scGetMaxExposureTime(sensor)
+            if ret == 0 and value <= max_us:
+                print(f"  → FPS {f} で上限 ≈{max_us}us に収まりました")
+                return
+        print(f"警告: {label} {value}us はFPSを{fps_state['fps']}まで下げても"
+              f"上限（≈{max_us}us）を超えています。この値は撮影に失敗する可能性があります")
+
+    _exposure_sensor_of = {}  # PARAM_META名 -> ScSensorType（main()内でしか解決できないためここで構築）
+
+    def _ensure_exposure_fits_for(cam, name, value):
+        sensor = _exposure_sensor_of.get(name)
+        if sensor is not None:
+            _ensure_exposure_fits(cam, sensor, value, PARAM_META[name]['label'])
 
     def _set_time_filter(cam, value):
         p = ScTimeFilterParams()
@@ -344,6 +466,12 @@ def main():
     def _get_wdr_mode(cam):
         return cam.scGetWDRModeEnabled()[1]
 
+    _exposure_sensor_of.update({
+        'tof_exposure': ScSensorType.SC_TOF_SENSOR,
+        'color_exposure': ScSensorType.SC_COLOR_SENSOR,
+        'color_aec_max_exposure_time': ScSensorType.SC_COLOR_SENSOR,
+    })
+
     _setters = {
         'tof_exposure': _set_tof_exposure,
         'color_exposure': _set_color_exposure,
@@ -379,6 +507,8 @@ def main():
 
     def apply_param(cam, name, value):
         casted = cast_value(name, value)
+        if name in _EXPOSURE_LIMIT_PARAMS:
+            _ensure_exposure_fits_for(cam, name, casted)
         param_specs[name]['setter'](cam, casted)
         return casted
 
@@ -391,7 +521,8 @@ def main():
     print(f"パラメータ: {[(n, param_specs[n]['label']) for n in names]}")
     print(f"組み合わせ数: {len(combos)}（combine={combine}）")
     print(f"モード: {mode}  warmup: {warmup_frames}フレーム  点群: {'ON' if pointcloud else 'OFF'}"
-          f"  Auto参考撮影: {'ON' if auto_reference else 'OFF'}")
+          f"  Auto参考撮影: {'ON' if auto_reference else 'OFF'}"
+          f"  FPS自動調整: {'ON' if auto_fps_adjust else 'OFF'}（基準FPS={fps_state['fps']}）")
     if baseline_overrides:
         print(f"基準値の上書き: {baseline_overrides}")
 
@@ -402,6 +533,8 @@ def main():
         sys.exit(1)
 
     save_intrinsics(cam, str(session.dir))
+
+    _warn_exposure_range(cam, sweep_specs, ScSensorType, auto_fps_adjust)
 
     for bname, bvalue in baseline_overrides.items():
         if bname in names:
@@ -541,7 +674,8 @@ def main():
                     elif key == ord('q'):
                         aborted = True
                         skipped = True
-                results.append({'combo': combo_casted, 'actual': actual, 'saved': saved, 'dirname': vdir.name})
+                results.append({'combo': combo_casted, 'actual': actual, 'saved': saved, 'dirname': vdir.name,
+                                 'fps': fps_state['fps']})
                 print(f"  {'OK ' if match else '!! '}{label}  実機: {actual_label}  "
                       f"{'保存' if saved else 'スキップ'}")
                 if aborted:
@@ -550,11 +684,13 @@ def main():
                 frame = grab_frame()
                 if frame is None:
                     print(f"  警告: フレーム取得に失敗、{label} をスキップします")
-                    results.append({'combo': combo_casted, 'actual': actual, 'saved': False, 'dirname': vdir.name})
+                    results.append({'combo': combo_casted, 'actual': actual, 'saved': False, 'dirname': vdir.name,
+                                     'fps': fps_state['fps']})
                     continue
                 color, depth, df = frame
                 save_capture(vdir, color, depth, df)
-                results.append({'combo': combo_casted, 'actual': actual, 'saved': True, 'dirname': vdir.name})
+                results.append({'combo': combo_casted, 'actual': actual, 'saved': True, 'dirname': vdir.name,
+                                 'fps': fps_state['fps']})
                 print(f"  {'OK ' if match else '!! '}{label}  実機: {actual_label}  → {vdir.name}/")
 
                 preview = cv2.resize(color, (800, 600))
@@ -574,6 +710,7 @@ def main():
             camera={'model': 'NYX660',
                     'resolution': [cfg['camera'].get('color_width'), cfg['camera'].get('color_height')],
                     'fps': cfg['camera'].get('fps'),
+                    'fps_final': fps_state['fps'],
                     'params_json': cfg['camera'].get('params_json')},
             params=names,
             sweeps=sweeps_meta,
@@ -582,6 +719,7 @@ def main():
             warmup_frames=warmup_frames,
             pointcloud=pointcloud,
             baseline_overrides=baseline_overrides,
+            auto_fps_adjust=auto_fps_adjust,
             config_file=args.config,
             auto_reference=auto_reference_result,
             aborted=aborted,
@@ -591,6 +729,9 @@ def main():
         cv2.destroyAllWindows()
         n_saved = sum(1 for r in results if r['saved'])
         print(f"\n完了: {n_saved}/{len(combos)} 通りを保存 → {session.dir}")
+        if fps_state['fps'] != cfg['camera'].get('fps'):
+            print(f"注意: FPS自動調整により、最終的なFPSは{cfg['camera'].get('fps')}から"
+                  f"{fps_state['fps']}まで下がっています（metadata.jsonのcamera.fps_finalに記録）")
         if n_saved > 0:
             _build_comparison_images(session.dir, results, names, combine, unit_map, auto_reference_result)
         print(f"検出集計は次のコマンドで実行できます:")

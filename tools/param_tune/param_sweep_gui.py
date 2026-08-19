@@ -164,6 +164,23 @@ class ParamSweepGUI:
                          variable=self.mode_var, value='manual').pack(side='left', padx=(12, 0))
         row += 1
 
+        ttk.Label(form, text="基準FPS（露光時間の上限に直結）").grid(row=row, column=0, sticky='w', pady=3)
+        fps_frame = ttk.Frame(form)
+        fps_frame.grid(row=row, column=1, sticky='w')
+        self.fps_var = tk.StringVar(value=str(self.fps if self.fps in (15, 30) else 30))
+        fps_combo = ttk.Combobox(fps_frame, textvariable=self.fps_var, state='readonly',
+                                  values=['15', '30'], width=4)
+        fps_combo.pack(side='left')
+        fps_combo.bind('<<ComboboxSelected>>', self._on_fps_changed)
+        ttk.Label(fps_frame, text="（低いFPSほど露光を長く取れる）", foreground='gray')\
+            .pack(side='left', padx=(8, 0))
+        row += 1
+
+        self.auto_fps_adjust_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(form, text="露光がFPS上限を超えたら自動でFPSを下げて撮影を続ける（FPS自動調整）",
+                         variable=self.auto_fps_adjust_var).grid(row=row, column=1, sticky='w', pady=3)
+        row += 1
+
         ttk.Label(form, text="warmupフレーム数（値変更後の安定待ち）").grid(row=row, column=0, sticky='w', pady=3)
         warm_frame = ttk.Frame(form)
         warm_frame.grid(row=row, column=1, sticky='w')
@@ -341,6 +358,10 @@ class ParamSweepGUI:
 
     # -------------------------------------------------------------- logic
 
+    def _on_fps_changed(self, *_):
+        self.fps = int(self.fps_var.get())
+        self._update_warmup_seconds()
+
     def _update_warmup_seconds(self, *_):
         try:
             n = int(self.warmup_var.get())
@@ -426,6 +447,8 @@ class ParamSweepGUI:
             'sweeps': sweeps_cfg,
             'combine': combine,
             'mode': self.mode_var.get(),
+            'fps': int(self.fps_var.get()),
+            'auto_fps_adjust': bool(self.auto_fps_adjust_var.get()),
             'warmup_frames': int(self.warmup_var.get()),
             'pause': float(self.pause_var.get()),
             'pointcloud': bool(self.pointcloud_var.get()),
