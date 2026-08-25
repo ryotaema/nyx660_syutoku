@@ -51,7 +51,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / 'nyx660_s
 
 from common import (
     find_latest_session, combo_label, result_filename, find_result_file,
-    build_montage, montage_grid_for_combos, with_reference_tile,
+    build_montage, montage_grid_for_combos, with_reference_tile, _sort_key,
 )
 from detect_eval import _load_metadata, _resolve_sweeps, _normalize_result, _is_numeric
 from utils import load_config
@@ -392,8 +392,8 @@ def _plot_single(rows, name, unit, title, png_path):
 
 def _plot_heatmap(rows, names, title, png_path):
     name_x, name_y = names
-    xs = sorted({r['_combo'][name_x] for r in rows}, key=str)
-    ys = sorted({r['_combo'][name_y] for r in rows}, key=str)
+    xs = sorted({r['_combo'][name_x] for r in rows}, key=_sort_key)
+    ys = sorted({r['_combo'][name_y] for r in rows}, key=_sort_key)
     xi = {v: i for i, v in enumerate(xs)}
     yi = {v: i for i, v in enumerate(ys)}
 
