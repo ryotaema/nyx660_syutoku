@@ -1,0 +1,19 @@
+# NYX660 屋外昼（晴れ〜薄曇り、逆光ぎみ）
+#
+# 根拠: 2026_0930_DS_compare/260930_outside_NYX_compare/134132（Color スイープ, 13:41）
+#   lum = 空を除いた輝度の中央値 / 検出数（YOLO conf 0.5）
+#   800us:72/7  1200us:91/9  1800us:112/9  2400us:129/13  3000us:142/10  3000us×gain3:156/9（最後以外は gain1）
+#   NYX はゲインの効きが弱い（gain1→3 で lum +1割）ため、段は露光を中心に組む。
+# ⚠ 空が広く写るシーン・曇天は未計測。スイープを撮ったら見直すこと。
+model: NYX660
+env: outdoor_day
+default_gear: 3
+gears:            # 暗い → 明るい
+  - {exposure: 800,  gain: 1.0}
+  - {exposure: 1200, gain: 1.0}
+  - {exposure: 1800, gain: 1.0}
+  - {exposure: 2400, gain: 1.0}   # 既定
+  - {exposure: 3000, gain: 1.0}
+  - {exposure: 3000, gain: 3.0}
+params:
+  target_lum: [115, 150]

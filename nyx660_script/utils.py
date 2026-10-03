@@ -38,7 +38,7 @@ def load_config():
         # params_json（唯一の情報源）から読み取ってデフォルトにする
         _fill_camera_defaults_from_params_json(cfg['camera'], params_path)
     # output paths: ~展開 → 相対パスならconfig.yaml基準で解決
-    for key in ('images_dir', 'pointcloud_dir', 'timelapse_dir', 'mp4_dir', 'param_tune_dir'):
+    for key in ('images_dir', 'pointcloud_dir', 'timelapse_dir', 'mp4_dir', 'param_tune_dir', 'gear_ae_dir'):
         if key not in cfg['output']:
             continue
         p = os.path.expanduser(cfg['output'][key])
@@ -409,6 +409,9 @@ def open_camera(cfg):
     ret = cam.scOpenDeviceBySN(info.serialNumber)
     if ret != 0:
         raise RuntimeError(f"scOpenDeviceBySN failed: {ret}")
+    # 呼び出し側で機種（productName）・シリアル番号を参照できるようにする
+    # （DS と NYX は同じSDKで動くため、機種名はここから取る）
+    cam.device_info = info
 
     # params_json が設定されているのに読み込めない場合は、意図しないパラメータのまま
     # データ取得が進んでしまう事故を防ぐため、警告で済ませず即座に停止する

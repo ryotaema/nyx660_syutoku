@@ -1,0 +1,20 @@
+# Vzense DS 屋外昼（晴れ〜薄曇り、逆光ぎみ）
+#
+# 根拠: 2026_0930_DS_compare の DS Color スイープ 3セッション（113116 実物 / 124718 模型 / 132612 比較用）
+#   lum（空を除いた輝度の中央値）は gain1 で  400us:52〜64  800us:81〜98  1200us:103〜121
+#   1600us:119〜138  2200us:136〜160  3000us:151〜178。DS は NYX より Color が明るく写る。
+# ⚠ 実機の productName が "DS86" か "DS87" かは未確認（2026_0930 のメタデータは機種名が
+#   'NYX660' 固定で記録されていたため）。違っていたらファイル名・model を合わせること。
+# ⚠ 空が広く写るシーン・曇天は未計測。スイープを撮ったら見直すこと。
+model: DS86
+env: outdoor_day
+default_gear: 3
+gears:            # 暗い → 明るい
+  - {exposure: 400,  gain: 1.0}
+  - {exposure: 800,  gain: 1.0}
+  - {exposure: 1200, gain: 1.0}
+  - {exposure: 1600, gain: 1.0}   # 既定
+  - {exposure: 2200, gain: 1.0}
+  - {exposure: 3000, gain: 1.0}
+params:
+  target_lum: [115, 150]
