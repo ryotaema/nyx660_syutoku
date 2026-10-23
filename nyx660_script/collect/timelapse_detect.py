@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import load_config, build_parser, apply_args, init_sdk, open_camera, close_camera
 from utils import extract_color, extract_depth, extract_ir, make_depth_colormap, get_bbox_depth
-from utils import Session
+from utils import Session, camera_metadata
 
 import cv2
 import numpy as np
@@ -219,10 +219,7 @@ try:
 
 finally:
     session.write_metadata(
-        camera={'model': 'NYX660',
-                'resolution': [_cfg['camera'].get('color_width'), _cfg['camera'].get('color_height')],
-                'fps': _cfg['camera'].get('fps'),
-                'params_json': _cfg['camera'].get('params_json')},
+        camera=camera_metadata(cam, _cfg),
         modalities=_mods,
         shot_count=save_count,
         timelapse={'interval_sec': INTERVAL, 'duration_hour': _args.duration,

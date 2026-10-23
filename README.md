@@ -9,6 +9,7 @@ nyx660_syutoku/
 ├── nyx660_script/
 │   ├── config.yaml
 │   ├── utils.py
+│   ├── gui.py                        # 統合GUI（各スクリプトをボタンで起動）
 │   ├── collect/
 │   │   ├── dataset_collect.py        # 連続収録（Enter 開始 / q 停止）
 │   │   ├── dataset_collect_photo.py  # 1ショット（s 保存 / q 終了）
@@ -57,7 +58,19 @@ pip install matplotlib
 
 [Vzense ScepterSDK](https://github.com/ScepterSW/ScepterSDK) を **Ubuntu 機で直接 clone** する（別 OS からのコピーは `.so` が壊れる）。
 
+**このリポジトリと同じ階層**（同じ親フォルダの中）に置く。`config.yaml` の `sdk_path` の既定値
+（`../../ScepterSDK`）はこの配置を前提にしているので、この通りに置けば設定の変更は不要。
+
+```
+<作業フォルダ>/            # 例: ~/annot_labelimg/Tof_camera/nyx660/
+├── nyx660_syutoku/        # このリポジトリ
+│   └── nyx660_script/
+│       └── config.yaml    # sdk_path: ../../ScepterSDK → <作業フォルダ>/ScepterSDK
+└── ScepterSDK/            # ← ここに clone
+```
+
 ```bash
+cd <作業フォルダ>          # nyx660_syutoku がある場所
 git clone https://github.com/ScepterSW/ScepterSDK
 ```
 
@@ -73,7 +86,8 @@ git clone https://github.com/ScepterSW/ScepterSDK
 
 ### config.yaml の編集
 
-`nyx660_script/config.yaml` の `sdk_path` を実際の SDK の場所に合わせて変更する（相対パス可）。
+SDK を上記の配置で置いた場合は変更不要。別の場所に置いた場合のみ，`nyx660_script/config.yaml` の
+`sdk_path` を実際の SDK の場所に合わせて変更する（`config.yaml` からの相対パス，または絶対パス）。
 
 ```yaml
 sdk_path: ../../ScepterSDK
@@ -114,6 +128,23 @@ model:
   confidence_threshold: 0.5
 ```
 
+## 使い方（GUI）
+
+はじめての人はまず GUI から使ってください（real_syutoku の GUI と同じ画面構成です）．
+
+```bash
+python3 nyx660_script/gui.py
+```
+
+1. 上の「カメラ」に検出された NYX660（シリアル・IP）が表示されます．出ないときは LAN 接続を確認して「再検出」．
+2. やりたいことのタブ（画像・点群・動画・タイムラプス・推論・アノテーション）を開き，ボタンを押します．
+3. カメラ映像のウィンドウが開いたら，ボタン横の「操作」に書かれたキーで保存・終了します．
+4. 途中でやめたいときは「停止」を押します（データは保存されたまま安全に終了します）．
+5. 「保存先を開く」で，最後に使った機能の保存フォルダが開きます．
+
+GUI は下記のスクリプトをボタンで起動しているだけなので，コマンドラインからの使い方も今までどおりです．
+細かいオプション（FPS・color 解像度など）を変えたいときはコマンドラインか `config.yaml` を使ってください．
+
 ## CLI オプション
 
 全スクリプト共通のオプション：
@@ -128,6 +159,7 @@ model:
 
 | オプション | 対象スクリプト | 説明 |
 |---|---|---|
+| `--model PATH` | yolo_detection / record_with_yolo | YOLO モデル（`config.yaml` の `model.yolo_path` を上書き） |
 | `--frames N` | dataset_point_collect | auto モードのフレーム数 |
 | `--mode auto\|manual` | dataset_point_collect | 取得モード |
 | `--sequential` | point_merge | ICP を前フレーム順に適用 |
@@ -172,7 +204,7 @@ cd nyx660_script/detect
 python3 yolo_detection.py
 ```
 
-ToF 深度を利用して各検出 BBox に距離（X.XXm）を表示する。モデルは `config.yaml` の `model.yolo_path` で指定。
+ToF 深度を利用して各検出 BBox に距離（X.XXm）を表示する。モデルは `config.yaml` の `model.yolo_path` で指定（`--model` で上書き可）。
 
 ### record/ — MP4 録画
 
@@ -232,7 +264,7 @@ nyx_260707_101741_00042_c.jpg
 
 | 要素 | 説明 |
 |------|------|
-| `cam` | `nyx`（NYX660）．real_syutoku 側は `d435` / `d405` を使うため，リポジトリを跨いでも衝突しません |
+| `cam` | `nyx`（NYX660）．real_syutoku 側は `d435` / `d405` / `g336` を使うため，リポジトリを跨いでも衝突しません |
 | `YYMMDD` | 取得日 |
 | `HHMMSS` | セッション開始時刻．1プロセス＝1セッションで固定です |
 | `NNNNN` | セッション内のショット連番．**同一ショットの color/depth/ir は同じ番号を共有します** |
@@ -252,6 +284,15 @@ nyx_260707_101741_00042_c.jpg
 labelImg の `.xml` も stem が一致するので自動的に紐づきます．
 
 撮影条件など，ファイル名に載せない情報は各セッションの `metadata.json` に記録されます．
+`camera` には real_syutoku と同じキーで機種・個体・条件が残ります（NYX660 はパラメータJSONのパスも記録）．
+
+```json
+"camera": {
+  "name": "NYX660", "model": "NYX660", "serial": "GN6601PBCA7110376", "backend": "scepter",
+  "resolution": [1600, 1200], "fps": 30, "depth_scale": 0.001,
+  "params_json": ".../camera_params/NYX660_ros_match_2026_08_17.json"
+}
+```
 
 ### セッションディレクトリとタグ
 

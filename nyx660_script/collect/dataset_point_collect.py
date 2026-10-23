@@ -6,7 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import load_config, build_parser, apply_args, init_sdk, open_camera, close_camera
-from utils import extract_depth, extract_color, make_depth_colormap, save_ply, save_intrinsics, Session
+from utils import extract_depth, extract_color, make_depth_colormap, save_ply, save_intrinsics, Session, camera_metadata
 
 _parser = build_parser()
 _parser.add_argument('--frames', type=int, default=None, metavar='N',
@@ -116,10 +116,7 @@ def write_metadata(actual_frames):
     color_resolution = ([640, 480] if align else
                          [_cfg['camera'].get('color_width'), _cfg['camera'].get('color_height')])
     session.write_metadata(
-        camera={'model': 'NYX660',
-                'resolution': color_resolution,
-                'fps': _cfg['camera'].get('fps', 30),
-                'params_json': _cfg['camera'].get('params_json')},
+        camera=camera_metadata(cam, _cfg, resolution=color_resolution),
         mode=mode,
         capture_frames=capture_frames if mode == 'auto' else None,
         actual_frames=actual_frames,
