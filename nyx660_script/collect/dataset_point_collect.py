@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import load_config, build_parser, apply_args, init_sdk, open_camera, close_camera
 from utils import extract_depth, extract_color, make_depth_colormap, save_ply, save_intrinsics, Session, camera_metadata
+from utils import PLY_FORMAT
 
 _parser = build_parser()
 _parser.add_argument('--frames', type=int, default=None, metavar='N',
@@ -122,6 +123,7 @@ def write_metadata(actual_frames):
         actual_frames=actual_frames,
         frames=_frames_meta,
         color_aligned_to_depth=align,
+        ply_format=PLY_FORMAT,
     )
 
 

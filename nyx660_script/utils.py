@@ -3,7 +3,6 @@ import argparse
 import json
 import sys
 import os
-import struct
 import time
 
 # sudo実行時にDISPLAYが消える問題を自動修正（cv2.imshow前に適用が必要）
@@ -588,23 +587,32 @@ def get_bbox_depth(depth, x1, y1, x2, y2):
     return float(np.median(valid)) if len(valid) > 0 else None
 
 
+# 点群 PLY の形式（real_syutoku と共通）。metadata.json の ply_format に記録する。
+#   単位 m、RealSense Viewer 座標系（x 右・y 上・カメラ前方が -z）
+# SDK の点群は OpenCV 系（x 右・y 下・z 前方）の mm なので、1/1000 して y・z を反転する
+# （2026-10-23 実機確認: 画像上端の点が y<0、z は depth 画像の値と一致）。
+# 2026-10 より前の nyx の PLY は SDK のまま（mm・OpenCV 系）。tools/convert_ply_to_m.py で変換できる。
+PLY_FORMAT = {'unit': 'm', 'axes': 'realsense_viewer'}
+_SDK_TO_PLY = np.array([0.001, -0.001, -0.001], dtype=np.float32)
+
+
 def save_ply(path, pointlist, count):
-    """ScVector3f のリストをバイナリ PLY として保存（z==0 / z==65535 は除外）。"""
-    valid = [(p.x, p.y, p.z) for p in pointlist[:count]
-             if p.z != 0 and p.z != 65535]
+    """ScVector3f のリスト（SDK の点群）をバイナリ PLY として保存（z==0 / z==65535 は除外）。
+    座標は PLY_FORMAT（m・RealSense Viewer 座標系）に変換して書く。"""
+    pts = np.frombuffer(pointlist, dtype='<f4', count=count * 3).reshape(-1, 3)
+    pts = pts[(pts[:, 2] != 0) & (pts[:, 2] != 65535)] * _SDK_TO_PLY
     with open(path, 'wb') as f:
         header = (
             "ply\n"
             "format binary_little_endian 1.0\n"
-            f"element vertex {len(valid)}\n"
+            f"element vertex {len(pts)}\n"
             "property float x\n"
             "property float y\n"
             "property float z\n"
             "end_header\n"
         )
         f.write(header.encode('ascii'))
-        for x, y, z in valid:
-            f.write(struct.pack('<fff', x, y, z))
+        f.write(pts.astype('<f4').tobytes())
 
 
 def write_ply_points(path, points_xyz):

@@ -28,7 +28,8 @@ nyx660_syutoku/
 │       └── click_dataset.py          # カメラ映像をクリックして座標＋画像を保存
 ├── tools/
 │   ├── rename_legacy.py     # 旧命名データを新命名規則へ変換（CLI）
-│   └── rename_legacy_gui.py # 同上（GUI）
+│   ├── rename_legacy_gui.py # 同上（GUI）
+│   └── convert_ply_to_m.py  # 旧形式（mm）の点群 PLY を m・RealSense Viewer 座標系へ変換
 └── data/
     ├── images/           # 収集画像（YYMMDD/nyx_YYMMDD_HHMMSS/）
     ├── pointcloud/       # 点群データ（YYMMDD/nyx_YYMMDD_HHMMSS/）
@@ -329,12 +330,20 @@ point_merge.py がセッション直下を走査するため，フラットに�
 pointcloud_dir/YYMMDD/nyx_YYMMDD_HHMMSS/
 ├── {prefix}_00001_c.jpg
 ├── {prefix}_00001_d.png     # 16bit PNG（mm単位）
-├── {prefix}_00001_pc.ply    # バイナリ PLY（z=0 / z=65535 除外済み）
+├── {prefix}_00001_pc.ply    # バイナリ PLY（m 単位・RealSense Viewer 座標系，z=0 / z=65535 除外済み）
 ├── intrinsics.json          # ToF / Color 内部パラメータ + 外部パラメータ
-└── metadata.json            # 取得モード・フレーム数・hardwaretimestamp 一覧
+└── metadata.json            # 取得モード・フレーム数・hardwaretimestamp 一覧・ply_format
 ```
 
 `point_merge.py` の出力は `{prefix}_merged_pc.ply` です．
+
+**点群 PLY の形式は real_syutoku と共通**です：単位は **m**，座標系は RealSense Viewer と同じ
+（x 右・y 上・カメラ前方が **-z**）．SDK の点群（mm・x 右・y 下・z 前方）を保存時に変換しています．
+`metadata.json` の `ply_format` に `{"unit": "m", "axes": "realsense_viewer"}` が記録されます．
+`depth` の PNG は従来どおり mm 単位の 16bit です．
+
+2026年10月より前に保存した PLY は **mm・SDK の座標系のまま**です．混ぜて使う場合は
+[旧形式の点群 PLY の変換](#旧形式の点群-ply-の変換) で変換してください．
 
 ### タイムラプス（timelapse_detect）
 
@@ -363,6 +372,21 @@ mp4_dir/
 ├── nyx_YYMMDD_HHMMSS_dc.mp4    # depth colormap 動画（640×480）
 └── nyx_YYMMDD_HHMMSS_det.mp4   # YOLO + 距離オーバーレイ動画（640×480）
 ```
+
+## 旧形式の点群 PLY の変換
+
+2026年10月より前の PLY（mm・SDK 座標系）を，現在の形式（m・RealSense Viewer 座標系）に変換します．
+`metadata.json` の `ply_format` と点の z の値から旧形式かどうかを判定し，変換済みのものは自動でスキップします．
+
+```bash
+# 何が変換されるか確認（dry-run）
+python3 tools/convert_ply_to_m.py data
+
+# 実行（変換前のファイルは *.ply.mm_bak として残る。不要なら --no-backup）
+python3 tools/convert_ply_to_m.py data --apply
+```
+
+マージ結果（`*_merged_pc.ply`）は変換しないので，変換後に `point_merge.py` をやり直してください．
 
 ## 旧データの変換
 
