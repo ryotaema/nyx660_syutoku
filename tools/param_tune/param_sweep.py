@@ -139,6 +139,7 @@ from common import (
 from utils import (
     load_config, build_parser, apply_args, init_sdk, open_camera, close_camera,
     extract_depth, extract_color, extract_ir, make_depth_colormap, save_ply, save_intrinsics, Session,
+    camera_metadata, PLY_FORMAT,
 )
 
 # FPS自動調整（--auto-fps-adjust）で段階的に下げていく候補（降順）。
@@ -771,17 +772,14 @@ def main():
                         'unit': param_specs[s['param']]['unit'], 'values': s['values']}
                        for s in sweep_specs]
         session.write_metadata(
-            camera={'model': 'NYX660',
-                    'resolution': [cfg['camera'].get('color_width'), cfg['camera'].get('color_height')],
-                    'fps': cfg['camera'].get('fps'),
-                    'fps_final': fps_state['fps'],
-                    'params_json': cfg['camera'].get('params_json')},
+            camera=dict(camera_metadata(cam, cfg), fps_final=fps_state['fps']),
             params=names,
             sweeps=sweeps_meta,
             combine=combine,
             mode=mode,
             warmup_frames=warmup_frames,
             pointcloud=pointcloud,
+            ply_format=PLY_FORMAT if pointcloud else None,
             save_ir=save_ir,
             baseline_overrides=baseline_overrides,
             auto_fps_adjust=auto_fps_adjust,

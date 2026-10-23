@@ -10,7 +10,7 @@ from utils import extract_color, extract_depth, get_bbox_depth
 import cv2
 from ctypes import c_uint16
 
-_args = build_parser().parse_args()
+_args = build_parser(include_model=True).parse_args()
 _cfg  = apply_args(load_config(), _args)
 init_sdk(_cfg)
 

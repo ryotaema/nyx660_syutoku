@@ -9,6 +9,7 @@ nyx660_syutoku/
 ├── nyx660_script/
 │   ├── config.yaml
 │   ├── utils.py
+│   ├── gui.py                        # 統合GUI（各スクリプトをボタンで起動）
 │   ├── collect/
 │   │   ├── dataset_collect.py        # 連続収録（Enter 開始 / q 停止）
 │   │   ├── dataset_collect_photo.py  # 1ショット（s 保存 / q 終了）
@@ -27,7 +28,8 @@ nyx660_syutoku/
 │       └── click_dataset.py          # カメラ映像をクリックして座標＋画像を保存
 ├── tools/
 │   ├── rename_legacy.py     # 旧命名データを新命名規則へ変換（CLI）
-│   └── rename_legacy_gui.py # 同上（GUI）
+│   ├── rename_legacy_gui.py # 同上（GUI）
+│   └── convert_ply_to_m.py  # 旧形式（mm）の点群 PLY を m・RealSense Viewer 座標系へ変換
 └── data/
     ├── images/           # 収集画像（YYMMDD/nyx_YYMMDD_HHMMSS/）
     ├── pointcloud/       # 点群データ（YYMMDD/nyx_YYMMDD_HHMMSS/）
@@ -57,7 +59,19 @@ pip install matplotlib
 
 [Vzense ScepterSDK](https://github.com/ScepterSW/ScepterSDK) を **Ubuntu 機で直接 clone** する（別 OS からのコピーは `.so` が壊れる）。
 
+**このリポジトリと同じ階層**（同じ親フォルダの中）に置く。`config.yaml` の `sdk_path` の既定値
+（`../../ScepterSDK`）はこの配置を前提にしているので、この通りに置けば設定の変更は不要。
+
+```
+<作業フォルダ>/            # 例: ~/annot_labelimg/Tof_camera/nyx660/
+├── nyx660_syutoku/        # このリポジトリ
+│   └── nyx660_script/
+│       └── config.yaml    # sdk_path: ../../ScepterSDK → <作業フォルダ>/ScepterSDK
+└── ScepterSDK/            # ← ここに clone
+```
+
 ```bash
+cd <作業フォルダ>          # nyx660_syutoku がある場所
 git clone https://github.com/ScepterSW/ScepterSDK
 ```
 
@@ -73,7 +87,8 @@ git clone https://github.com/ScepterSW/ScepterSDK
 
 ### config.yaml の編集
 
-`nyx660_script/config.yaml` の `sdk_path` を実際の SDK の場所に合わせて変更する（相対パス可）。
+SDK を上記の配置で置いた場合は変更不要。別の場所に置いた場合のみ，`nyx660_script/config.yaml` の
+`sdk_path` を実際の SDK の場所に合わせて変更する（`config.yaml` からの相対パス，または絶対パス）。
 
 ```yaml
 sdk_path: ../../ScepterSDK
@@ -114,6 +129,23 @@ model:
   confidence_threshold: 0.5
 ```
 
+## 使い方（GUI）
+
+はじめての人はまず GUI から使ってください（real_syutoku の GUI と同じ画面構成です）．
+
+```bash
+python3 nyx660_script/gui.py
+```
+
+1. 上の「カメラ」に検出された NYX660（シリアル・IP）が表示されます．出ないときは LAN 接続を確認して「再検出」．
+2. やりたいことのタブ（画像・点群・動画・タイムラプス・推論・アノテーション）を開き，ボタンを押します．
+3. カメラ映像のウィンドウが開いたら，ボタン横の「操作」に書かれたキーで保存・終了します．
+4. 途中でやめたいときは「停止」を押します（データは保存されたまま安全に終了します）．
+5. 「保存先を開く」で，最後に使った機能の保存フォルダが開きます．
+
+GUI は下記のスクリプトをボタンで起動しているだけなので，コマンドラインからの使い方も今までどおりです．
+細かいオプション（FPS・color 解像度など）を変えたいときはコマンドラインか `config.yaml` を使ってください．
+
 ## CLI オプション
 
 全スクリプト共通のオプション：
@@ -128,6 +160,7 @@ model:
 
 | オプション | 対象スクリプト | 説明 |
 |---|---|---|
+| `--model PATH` | yolo_detection / record_with_yolo | YOLO モデル（`config.yaml` の `model.yolo_path` を上書き） |
 | `--frames N` | dataset_point_collect | auto モードのフレーム数 |
 | `--mode auto\|manual` | dataset_point_collect | 取得モード |
 | `--sequential` | point_merge | ICP を前フレーム順に適用 |
@@ -172,7 +205,7 @@ cd nyx660_script/detect
 python3 yolo_detection.py
 ```
 
-ToF 深度を利用して各検出 BBox に距離（X.XXm）を表示する。モデルは `config.yaml` の `model.yolo_path` で指定。
+ToF 深度を利用して各検出 BBox に距離（X.XXm）を表示する。モデルは `config.yaml` の `model.yolo_path` で指定（`--model` で上書き可）。
 
 ### record/ — MP4 録画
 
@@ -232,7 +265,7 @@ nyx_260707_101741_00042_c.jpg
 
 | 要素 | 説明 |
 |------|------|
-| `cam` | `nyx`（NYX660）．real_syutoku 側は `d435` / `d405` を使うため，リポジトリを跨いでも衝突しません |
+| `cam` | `nyx`（NYX660）．real_syutoku 側は `d435` / `d405` / `g336` を使うため，リポジトリを跨いでも衝突しません |
 | `YYMMDD` | 取得日 |
 | `HHMMSS` | セッション開始時刻．1プロセス＝1セッションで固定です |
 | `NNNNN` | セッション内のショット連番．**同一ショットの color/depth/ir は同じ番号を共有します** |
@@ -252,6 +285,15 @@ nyx_260707_101741_00042_c.jpg
 labelImg の `.xml` も stem が一致するので自動的に紐づきます．
 
 撮影条件など，ファイル名に載せない情報は各セッションの `metadata.json` に記録されます．
+`camera` には real_syutoku と同じキーで機種・個体・条件が残ります（NYX660 はパラメータJSONのパスも記録）．
+
+```json
+"camera": {
+  "name": "NYX660", "model": "NYX660", "serial": "GN6601PBCA7110376", "backend": "scepter",
+  "resolution": [1600, 1200], "fps": 30, "depth_scale": 0.001,
+  "params_json": ".../camera_params/NYX660_ros_match_2026_08_17.json"
+}
+```
 
 ### セッションディレクトリとタグ
 
@@ -288,12 +330,20 @@ point_merge.py がセッション直下を走査するため，フラットに�
 pointcloud_dir/YYMMDD/nyx_YYMMDD_HHMMSS/
 ├── {prefix}_00001_c.jpg
 ├── {prefix}_00001_d.png     # 16bit PNG（mm単位）
-├── {prefix}_00001_pc.ply    # バイナリ PLY（z=0 / z=65535 除外済み）
+├── {prefix}_00001_pc.ply    # バイナリ PLY（m 単位・RealSense Viewer 座標系，z=0 / z=65535 除外済み）
 ├── intrinsics.json          # ToF / Color 内部パラメータ + 外部パラメータ
-└── metadata.json            # 取得モード・フレーム数・hardwaretimestamp 一覧
+└── metadata.json            # 取得モード・フレーム数・hardwaretimestamp 一覧・ply_format
 ```
 
 `point_merge.py` の出力は `{prefix}_merged_pc.ply` です．
+
+**点群 PLY の形式は real_syutoku と共通**です：単位は **m**，座標系は RealSense Viewer と同じ
+（x 右・y 上・カメラ前方が **-z**）．SDK の点群（mm・x 右・y 下・z 前方）を保存時に変換しています．
+`metadata.json` の `ply_format` に `{"unit": "m", "axes": "realsense_viewer"}` が記録されます．
+`depth` の PNG は従来どおり mm 単位の 16bit です．
+
+2026年10月より前に保存した PLY は **mm・SDK の座標系のまま**です．混ぜて使う場合は
+[旧形式の点群 PLY の変換](#旧形式の点群-ply-の変換) で変換してください．
 
 ### タイムラプス（timelapse_detect）
 
@@ -322,6 +372,21 @@ mp4_dir/
 ├── nyx_YYMMDD_HHMMSS_dc.mp4    # depth colormap 動画（640×480）
 └── nyx_YYMMDD_HHMMSS_det.mp4   # YOLO + 距離オーバーレイ動画（640×480）
 ```
+
+## 旧形式の点群 PLY の変換
+
+2026年10月より前の PLY（mm・SDK 座標系）を，現在の形式（m・RealSense Viewer 座標系）に変換します．
+`metadata.json` の `ply_format` と点の z の値から旧形式かどうかを判定し，変換済みのものは自動でスキップします．
+
+```bash
+# 何が変換されるか確認（dry-run）
+python3 tools/convert_ply_to_m.py data
+
+# 実行（変換前のファイルは *.ply.mm_bak として残る。不要なら --no-backup）
+python3 tools/convert_ply_to_m.py data --apply
+```
+
+マージ結果（`*_merged_pc.ply`）は変換しないので，変換後に `point_merge.py` をやり直してください．
 
 ## 旧データの変換
 

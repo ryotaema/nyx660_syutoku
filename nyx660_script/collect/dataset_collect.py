@@ -6,7 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import load_config, build_parser, apply_args, init_sdk, open_camera, close_camera
-from utils import extract_depth, extract_color, extract_ir, make_depth_colormap, save_intrinsics, Session
+from utils import extract_depth, extract_color, extract_ir, make_depth_colormap, save_intrinsics, Session, camera_metadata
 
 _args = build_parser().parse_args()
 _cfg  = apply_args(load_config(), _args)
@@ -126,10 +126,7 @@ try:
 finally:
     print(f"\n合計 {i} フレーム保存 → {session.dir}")
     session.write_metadata(
-        camera={'model': 'NYX660',
-                'resolution': [_cfg['camera'].get('color_width'), _cfg['camera'].get('color_height')],
-                'fps': _cfg['camera'].get('fps'),
-                'params_json': _cfg['camera'].get('params_json')},
+        camera=camera_metadata(cam, _cfg),
         modalities=_mods,
         shot_count=i,
         frames=_frames_meta,
