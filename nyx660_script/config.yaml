@@ -1,4 +1,6 @@
-sdk_path: ../../ScepterSDK  # config.yaml からの相対パス。リポジトリと同じ階層に ScepterSDK を置く前提（README「SDK」参照）
+# リポジトリとSDKを同じ親ディレクトリに置く場合。このconfig.yamlからの相対パス。
+# 別の配置では変更するか、SCEPTER_SDK_PATHで上書きする（README「SDK」参照）。
+sdk_path: ../../ScepterSDK
 
 camera:
   # ScepterGUITool で調整してエクスポートしたパラメータJSON（config.yaml からの相対パス）。

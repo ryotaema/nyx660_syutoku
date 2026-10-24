@@ -4,19 +4,24 @@ import json
 import sys
 import os
 import time
+import pwd
+import struct
+from pathlib import Path
 
 # sudo実行時にDISPLAYが消える問題を自動修正（cv2.imshow前に適用が必要）
 if 'DISPLAY' not in os.environ:
     os.environ['DISPLAY'] = ':0'
     sudo_user = os.environ.get('SUDO_USER')
     if sudo_user:
-        xauth = f'/home/{sudo_user}/.Xauthority'
-        if os.path.exists(xauth):
-            os.environ['XAUTHORITY'] = xauth
+        try:
+            xauth = Path(pwd.getpwnam(sudo_user).pw_dir) / '.Xauthority'
+        except KeyError:
+            xauth = None
+        if xauth and xauth.exists():
+            os.environ['XAUTHORITY'] = str(xauth)
 import numpy as np
 import cv2
 from datetime import datetime
-from pathlib import Path
 from ctypes import c_uint8, c_int32, c_uint16, c_bool
 
 _CFG_PATH = Path(__file__).parent / "config.yaml"
@@ -27,7 +32,7 @@ def load_config():
         cfg = yaml.safe_load(f)
     cfg_dir = _CFG_PATH.parent
     # sdk_path: 相対パスならconfig.yaml基準で解決
-    p = cfg['sdk_path']
+    p = os.environ.get('SCEPTER_SDK_PATH', cfg['sdk_path'])
     cfg['sdk_path'] = str((cfg_dir / p).resolve()) if not os.path.isabs(p) else p
     # camera.params_json: 相対パスならconfig.yaml基準で解決
     p = cfg.get('camera', {}).get('params_json')
@@ -125,6 +130,9 @@ CAM = 'nyx'  # このリポジトリはNYX660固定
 # （キーがそのままセッション配下のサブディレクトリ名になる）
 MOD_CODES = {
     'color':          'c',
+    'color_raw':      'cr',    # ロスレスPNG
+    'depth_raw':      'dr',    # 位置合わせ前の深度
+    'ir_color':       'i1c',
     'depth':          'd',      # 16bit raw（png）
     'depth_colormap': 'dc',
     'ir':             'i1',     # 単眼IR（NYX660）
@@ -517,9 +525,15 @@ def save_intrinsics(cam, save_dir):
     """ToF/Colorセンサーの内部・外部パラメータを <save_dir>/intrinsics.json として保存する。"""
     from API.ScepterDS_enums import ScSensorType
 
-    _, tof_intr = cam.scGetSensorIntrinsicParameters(ScSensorType.SC_TOF_SENSOR)
-    _, col_intr = cam.scGetSensorIntrinsicParameters(ScSensorType.SC_COLOR_SENSOR)
-    _, extr     = cam.scGetSensorExtrinsicParameters()
+    ret, tof_intr = cam.scGetSensorIntrinsicParameters(ScSensorType.SC_TOF_SENSOR)
+    if ret != 0:
+        raise RuntimeError(f'ToF内部パラメータを取得できません: {ret}')
+    ret, col_intr = cam.scGetSensorIntrinsicParameters(ScSensorType.SC_COLOR_SENSOR)
+    if ret != 0:
+        raise RuntimeError(f'RGB内部パラメータを取得できません: {ret}')
+    ret, extr = cam.scGetSensorExtrinsicParameters()
+    if ret != 0:
+        raise RuntimeError(f'外部パラメータを取得できません: {ret}')
 
     intrinsics_data = {
         'tof': {

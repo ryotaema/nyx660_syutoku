@@ -1,107 +1,105 @@
+"""RGB・深度・IR・PLYを、[s] または --once でまとめて保存する。"""
+import json
+import shutil
 import sys
-import gc
-import numpy as np
-import cv2
+import time
+from datetime import datetime, timezone
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from utils import load_config, build_parser, apply_args, init_sdk, open_camera, close_camera
-from utils import extract_depth, extract_color, extract_ir, make_depth_colormap, save_intrinsics, Session, camera_metadata
+import cv2
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from utils import (load_config, build_parser, apply_args, init_sdk, open_camera, close_camera,
+                   make_depth_colormap, save_intrinsics, camera_metadata, PLY_FORMAT)
+from snapshot import create_session, SnapshotReader, save_frame_bundle, preview_grid
 
-_args = build_parser().parse_args()
-_cfg  = apply_args(load_config(), _args)
-init_sdk(_cfg)
 
-from API.ScepterDS_enums import ScFrameType
-from ctypes import c_uint16
+def main():
+    parser = build_parser()
+    parser.add_argument('--once', action='store_true', help='ウォームアップ後、全データを1枚保存して終了')
+    parser.add_argument('--warmup', type=float, default=2.0, help='露光安定待ち時間（秒、既定2）')
+    parser.add_argument('--timeout', type=float, default=10.0, help='必要なフレームの取得待ち上限（秒）')
+    parser.add_argument('--no-preview', action='store_true', help='--once時に画面を表示しない')
+    args = parser.parse_args()
+    if args.warmup < 0 or args.timeout <= 0 or (args.no_preview and not args.once):
+        parser.error('warmupは0以上、timeoutは正の値、no-previewはonceと併用してください')
+    cfg = apply_args(load_config(), args)
+    camera = session = None
+    frames_meta = []
+    metadata = {'shot_count': 0, 'frames': frames_meta}
+    error = None
+    try:
+        if not args.no_preview:
+            cv2.namedWindow('NYX660', cv2.WINDOW_AUTOSIZE)
+            cv2.waitKey(1)
+        init_sdk(cfg)
+        from API.ScepterDS_enums import ScFrameType
+        camera = open_camera(cfg)
+        session = create_session(cfg['output']['images_dir'], 'nyx', args.tag)
+        save_intrinsics(camera, str(session.dir))
+        preset = cfg['camera'].get('params_json')
+        if preset:
+            shutil.copyfile(preset, session.dir / 'camera_parameters.json')
+        settings = dict(cfg['camera'])
+        if preset:
+            settings['params_json'] = 'camera_parameters.json'
+        (session.dir / 'camera_settings.json').write_text(json.dumps(settings, indent=2))
+        metadata.update(camera=camera_metadata(camera, cfg), ply_format=dict(PLY_FORMAT, color=False),
+                        depth_aligned_to=None, unavailable_modalities=['ir_right'],
+                        frame_pairing='latest RGB/depth/IR within max_frame_age_ms; see hardware timestamps')
+        reader = SnapshotReader(ScFrameType, cfg['camera'].get('fps', 30))
+        metadata['max_frame_age_ms'] = reader.max_age * 1000
+        alpha = cfg['camera'].get('depth_alpha', 0.4)
+        print(f'保存先: {session.dir}', flush=True)
+        print('RGB・深度・IR・PLYを保存します。[s] 保存  [q] 終了', flush=True)
+        begin = last_frame = time.monotonic()
+        while True:
+            frame = reader.read(camera)
+            key = -1
+            if frame is not None:
+                last_frame = time.monotonic()
+                depth_cm = make_depth_colormap(frame['depth'], alpha)
+                if not args.no_preview:
+                    preview = preview_grid(frame['color'], depth_cm, [frame['ir']])
+                    cv2.putText(preview, f'[s] Save all  [q] Quit   Saved: {len(frames_meta)}',
+                                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                    cv2.imshow('NYX660', preview)
+            if not args.no_preview:
+                key = cv2.waitKey(1) & 0xff
+            if key == ord('q'):
+                break
+            if frame is None:
+                if time.monotonic() - last_frame > args.timeout:
+                    raise RuntimeError('RGB・深度・IRが揃いません。接続・ワークモード・FPSを確認してください。')
+                continue
+            if time.monotonic() - begin < args.warmup:
+                continue
+            if args.once or key == ord('s'):
+                record = save_frame_bundle(session, len(frames_meta) + 1, frame, depth_cm)
+                record['saved_at'] = datetime.now(timezone.utc).isoformat()
+                frames_meta.append(record)
+                metadata.update(camera=camera_metadata(camera, cfg,
+                                                       resolution=[frame['color'].shape[1], frame['color'].shape[0]]),
+                                modalities=list(record['files']), shot_count=len(frames_meta))
+                session.write_metadata(**metadata)
+                print(f'[{len(frames_meta)}枚目] 全データ保存完了（PLY含む）', flush=True)
+                if args.once:
+                    break
+    except Exception as exc:  # CLIの境界で失敗を記録し、カメラはfinallyで解放する。
+        error = f'{type(exc).__name__}: {exc}'
+        print(f'エラー: {exc}', file=sys.stderr, flush=True)
+    finally:
+        try:
+            if session is not None:
+                session.write_metadata(**metadata, error=error)
+        finally:
+            try:
+                if camera is not None:
+                    close_camera(camera)
+            finally:
+                if not args.no_preview:
+                    cv2.destroyAllWindows()
+    return 1 if error else 0
 
-_depth_alpha = _cfg['camera'].get('depth_alpha', 0.4)
 
-# --- 保存ディレクトリ設定 ---
-_mods   = ['color', 'depth', 'depth_colormap', 'ir']
-session = Session(_cfg['output']['images_dir'], tag=_args.tag, subdirs=_mods)
-print(f"保存先: {session.dir}")
-
-# --- カメラ初期化 ---
-try:
-    cam = open_camera(_cfg)
-except RuntimeError as e:
-    print(f"エラー: {e}")
-    sys.exit(1)
-
-save_intrinsics(cam, str(session.dir))
-
-shot_count = 0
-_frames_meta = []
-
-try:
-    print("\n[s] で1枚保存  [q] で終了\n")
-
-    while True:
-        ret, frameready = cam.scGetFrameReady(c_uint16(1200))
-        if ret != 0:
-            continue
-
-        color = depth = ir = None
-        color_ts = depth_ts = None
-        if frameready.color:
-            ret, cf = cam.scGetFrame(ScFrameType.SC_COLOR_FRAME)
-            if ret == 0:
-                color    = extract_color(cf)
-                color_ts = int(cf.hardwaretimestamp)
-        if frameready.depth:
-            ret, df = cam.scGetFrame(ScFrameType.SC_DEPTH_FRAME)
-            if ret == 0:
-                depth    = extract_depth(df)
-                depth_ts = int(df.hardwaretimestamp)
-        if frameready.ir:
-            ret, irf = cam.scGetFrame(ScFrameType.SC_IR_FRAME)
-            if ret == 0:
-                ir = extract_ir(irf)
-
-        if color is None or depth is None:
-            continue
-
-        depth_cm = make_depth_colormap(depth, _depth_alpha)
-        color_sm = cv2.resize(color, (depth_cm.shape[1], depth_cm.shape[0]))
-        top = np.hstack([color_sm, depth_cm])
-        if ir is not None:
-            ir_color = cv2.applyColorMap(ir, cv2.COLORMAP_JET)
-            top = np.vstack([top, np.hstack([ir_color, np.zeros_like(depth_cm)])])
-
-        cv2.putText(top, f"[s] Save  [q] Quit   Saved: {shot_count}",
-                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        cv2.imshow('NYX660', top)
-
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('s'):
-            shot_count += 1
-
-            cv2.imwrite(session.path(shot_count, 'color'),            color)
-            cv2.imwrite(session.path(shot_count, 'depth', ext='png'), depth)
-            cv2.imwrite(session.path(shot_count, 'depth_colormap'),   depth_cm)
-            if ir is not None:
-                cv2.imwrite(session.path(shot_count, 'ir'), ir)
-
-            _frames_meta.append({
-                'index': shot_count,
-                'color_hardwaretimestamp': color_ts,
-                'depth_hardwaretimestamp': depth_ts,
-            })
-
-            print(f"[{shot_count}枚目保存] {session.name(shot_count, 'color')}")
-
-        elif key == ord('q'):
-            print(f"\n終了します。合計 {shot_count} 枚保存しました。")
-            break
-
-finally:
-    session.write_metadata(
-        camera=camera_metadata(cam, _cfg),
-        modalities=_mods,
-        shot_count=shot_count,
-        frames=_frames_meta,
-    )
-    close_camera(cam)
-    cv2.destroyAllWindows()
-    gc.collect()
+if __name__ == '__main__':
+    sys.exit(main())

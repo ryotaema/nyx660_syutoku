@@ -39,7 +39,12 @@ nyx660_syutoku/
 
 ## セットアップ
 
+PythonとメーカーSDKを使ってカメラへ直接接続します．ROSの導入やROS2ドライバのビルドは不要です．
+Dockerを使う場合は，下記「Docker環境内で利用する場合」を参照してください．
+
 ### 必要なパッケージ
+
+リポジトリのルートで実行します．
 
 ```bash
 # 基本
@@ -57,7 +62,19 @@ pip install matplotlib
 
 ### SDK
 
-[Vzense ScepterSDK](https://github.com/ScepterSW/ScepterSDK) を **Ubuntu 機で直接 clone** する（別 OS からのコピーは `.so` が壊れる）。
+SDK本体はこのリポジトリに含まれていません．
+[Vzense ScepterSDK](https://github.com/ScepterSW/ScepterSDK) をUbuntu上で別途取得します．
+例えば，このリポジトリとSDKを次のように並べて配置できます．親ディレクトリの場所は任意です．
+
+```text
+任意の親ディレクトリ/
+├── ScepterSDK/
+└── nyx660_syutoku/
+    └── nyx660_script/
+        └── config.yaml
+```
+
+上記の親ディレクトリで実行します．既にSDKが配置されている場合は再clone不要です．
 
 **このリポジトリと同じ階層**（同じ親フォルダの中）に置く。`config.yaml` の `sdk_path` の既定値
 （`../../ScepterSDK`）はこの配置を前提にしているので、この通りに置けば設定の変更は不要。
@@ -71,8 +88,7 @@ pip install matplotlib
 ```
 
 ```bash
-cd <作業フォルダ>          # nyx660_syutoku がある場所
-git clone https://github.com/ScepterSW/ScepterSDK
+git clone https://github.com/ScepterSW/ScepterSDK.git ScepterSDK
 ```
 
 > **注意**: SDK v26.03 以降が必要。旧バージョン（v24.12 以前）では depth/IR フレームが取得できない。
@@ -85,14 +101,63 @@ git clone https://github.com/ScepterSW/ScepterSDK
 | PC 側 IP | 192.168.1.100 / 255.255.255.0 |
 | リンク速度 | **ギガビット必須**（LAN ランプ黄=GbE / 緑=100M） |
 
+実際のカメラのネットワーク設定に合わせ，PCからカメラへ疎通できるように設定します．
+
 ### config.yaml の編集
 
-SDK を上記の配置で置いた場合は変更不要。別の場所に置いた場合のみ，`nyx660_script/config.yaml` の
-`sdk_path` を実際の SDK の場所に合わせて変更する（`config.yaml` からの相対パス，または絶対パス）。
+既定の `sdk_path` は，上記のようにSDKをリポジトリと並べた場合の指定です．
+異なる配置では `nyx660_script/config.yaml` の値を変更するか，環境変数で上書きしてください．
 
 ```yaml
 sdk_path: ../../ScepterSDK
 ```
+
+環境変数での指定例です．
+
+```bash
+export SCEPTER_SDK_PATH=../../ScepterSDK
+```
+
+環境変数が `config.yaml` より優先されます．どちらも相対パスの基準は
+`nyx660_script/config.yaml` のあるディレクトリで，コマンドを実行する場所ではありません．
+
+### Docker環境内で利用する場合（任意）
+
+Dockerを使う場合は，Python依存とSDKをコンテナ内から利用できるようにします．
+ホストにインストールしたPythonパッケージはコンテナには引き継がれません．
+SDKもマウント範囲内に置き，`sdk_path` または `SCEPTER_SDK_PATH` で指定してください．
+
+用意済みのHumbleベースのDocker環境を使う場合も，このスクリプトのために
+ROS2ドライバをビルドする必要はありません．
+共有SDKを利用する構成の例は次のとおりです．SDKの取得方法は
+[共有SDKの配置手順](../../vendor/README.md#別pcでsdkを準備する) を参照してください．
+
+```text
+ros2_ws/
+├── vendor/ScepterSDK_hr/
+└── workspaces/nyx660_syutoku/
+```
+
+Docker構成ディレクトリから，起動時と同じCompose設定でコンテナに入ります．
+以下はCPU構成の例です．NVIDIA構成では
+`docker compose -f compose.yaml -f compose.nvidia.yaml exec humble bash` を使います．
+
+```bash
+docker compose exec humble bash
+```
+
+コンテナ内のワークスペースルートから実行します．
+共有SDKの指定はこのシェル内でのみ有効で，通常の `config.yaml` は変更しません．
+
+```bash
+export SCEPTER_SDK_PATH=../../../vendor/ScepterSDK_hr
+cd workspaces/nyx660_syutoku
+python3 nyx660_script/collect/dataset_collect_photo.py
+```
+
+用意済みのDockerイメージにはPythonの基本依存が含まれています．
+独自のイメージでは「必要なパッケージ」をコンテナ内へ導入してください．
+`network_mode: host` の構成では，ホスト側で有線LANを設定してカメラへ疎通させます．
 
 ## 設定ファイル
 
@@ -145,6 +210,60 @@ python3 nyx660_script/gui.py
 
 GUI は下記のスクリプトをボタンで起動しているだけなので，コマンドラインからの使い方も今までどおりです．
 細かいオプション（FPS・color 解像度など）を変えたいときはコマンドラインか `config.yaml` を使ってください．
+
+### RGB・深度・IR・PLYの一括取得
+
+「画像」タブの **全データを1枚取得** は，約2秒の露光安定待ちの後に1ショット分を保存して終了します．
+**全データを1枚ずつ撮る** はプレビューを開き，`s` を押すたびに同じ組のデータを保存します（`q` で終了）．
+従来の `dataset_collect_photo.py` からも，画像とPLYをまとめて保存できます．ROSは不要です．
+
+保存先は `config.yaml` の `output.images_dir` 配下です．各ファイルは同じショット番号を共有します．
+RGBは既存の処理用JPEGとロスレスPNGの両方を保存し，深度・IRの生データもPNGで残します．
+メタデータの `frames[].files` に，そのショットの各ファイルの相対パスが入ります．
+
+| データ | 保存先 | 内容 |
+|---|---|---|
+| RGB | `color/*_c.jpg` | 既存の収集画像と同じJPEG |
+| RGB（ロスレス） | `color_raw/*_cr.png` | 取得画素を保持したPNG |
+| 深度 | `depth/*_d.png` | 16bit PNG．距離は画素値 × `metadata.camera.depth_scale` [m] |
+| 深度可視化 | `depth_colormap/*_dc.jpg` | プレビュー用の疑似カラー画像 |
+| IR | `ir/*_i1.png` | 単眼IRの8bit PNG |
+| IR可視化 | `ir_color/*_i1c.jpg` | IRの疑似カラー画像 |
+| 点群 | `pointcloud/*_pc.ply` | 無効深度を除いた点群．単位m，RealSense Viewer座標系（x右・y上・前方−z） |
+| カメラ情報 | `intrinsics.json` / `camera_settings.json` | 内部パラメータ・撮影設定 |
+| 取得記録 | `metadata.json` | 機種・シリアル番号・保存ファイル・フレーム番号・取得時刻・画像サイズ |
+
+RGB・深度・IRはネイティブの解像度と座標系で保存します．プレビューだけを縮小します．
+PLYはSDKが深度から変換したXYZ点群で，RGBは別ファイルに保存します．
+`intrinsics.json` にはToF・カラーの内部パラメータと両センサー間の外部パラメータが入ります．
+設定JSONを使う場合は，原本も `camera_parameters.json` にコピーします．
+別タイミングで到着するフレームは，既定で250ms以内（低FPS時は3フレーム周期以内）の
+最新データを組み合わせます．厳密な同時露光は保証せず，SDKのハードウェア時刻と
+キャッシュの経過時間を各ショットに記録します．古いフレームやIR未取得のまま保存しません．
+
+コマンドラインでは，リポジトリのルートから次のように実行できます．
+
+```bash
+# 1ショット分の全データを保存して終了（GUIの「全データを1枚取得」と同じ）
+python3 nyx660_script/collect/dataset_collect_photo.py --once
+
+# sで全データを1組ずつ保存，qで終了
+python3 nyx660_script/collect/dataset_collect_photo.py
+
+# 画面を使わず1ショット保存．待ち時間は任意に変更できる
+python3 nyx660_script/collect/dataset_collect_photo.py --once --no-preview --warmup 2
+```
+
+必要なフレームが揃わない場合は既定で10秒後にエラーにします（`--timeout` で変更可）．
+画像とPLYの保存が完了したショットだけを撮影枚数に数えます．
+既存の同名ファイルは上書きせず，同じ秒に別セッションを開始する場合も保存先を分けます．
+
+保存処理と模擬カメラによるテストは，カメラを接続せずに実行できます．
+
+```bash
+python3 -m unittest discover -s tests -p test_snapshot.py
+```
+
 
 ## CLI オプション
 
@@ -289,7 +408,7 @@ labelImg の `.xml` も stem が一致するので自動的に紐づきます．
 
 ```json
 "camera": {
-  "name": "NYX660", "model": "NYX660", "serial": "GN6601PBCA7110376", "backend": "scepter",
+  "name": "NYX660", "model": "NYX660", "serial": "NYX_SERIAL_NUMBER", "backend": "scepter",
   "resolution": [1600, 1200], "fps": 30, "depth_scale": 0.001,
   "params_json": ".../camera_params/NYX660_ros_match_2026_08_17.json"
 }
@@ -311,7 +430,7 @@ python3 collect/dataset_collect_photo.py --tag greenhouse
 
 ## 保存形式
 
-### 画像収集（dataset_collect / dataset_collect_photo）
+### 連続画像収集（dataset_collect）
 
 ```
 images_dir/YYMMDD/nyx_YYMMDD_HHMMSS/
