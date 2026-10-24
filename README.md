@@ -8,6 +8,7 @@ Vzense NYX660（3D ToF + RGB カメラ）を用いた学習データ収集スク
 nyx660_syutoku/
 ├── nyx660_script/
 │   ├── config.yaml
+│   ├── config.local.yaml.example     # 環境ごとの上書き設定の例（config.local.yaml にコピーして使う）
 │   ├── utils.py
 │   ├── gui.py                        # 統合GUI（各スクリプトをボタンで起動）
 │   ├── collect/
@@ -106,7 +107,7 @@ git clone https://github.com/ScepterSW/ScepterSDK.git ScepterSDK
 ### config.yaml の編集
 
 既定の `sdk_path` は，上記のようにSDKをリポジトリと並べた場合の指定です．
-異なる配置では `nyx660_script/config.yaml` の値を変更するか，環境変数で上書きしてください．
+異なる配置では `nyx660_script/config.local.yaml`（後述の「環境ごとの設定」）で上書きするか，環境変数で指定してください．
 
 ```yaml
 sdk_path: ../../ScepterSDK
@@ -118,7 +119,7 @@ sdk_path: ../../ScepterSDK
 export SCEPTER_SDK_PATH=../../ScepterSDK
 ```
 
-環境変数が `config.yaml` より優先されます．どちらも相対パスの基準は
+環境変数が `config.yaml`・`config.local.yaml` より優先されます．どちらも相対パスの基準は
 `nyx660_script/config.yaml` のあるディレクトリで，コマンドを実行する場所ではありません．
 
 ### Docker環境内で利用する場合（任意）
@@ -193,6 +194,23 @@ model:
   yolo_path: model/best.pt   # YOLO モデルファイル（config.yaml からの相対パス）
   confidence_threshold: 0.5
 ```
+
+### 環境ごとの設定（config.local.yaml）
+
+手元のモデル名や SDK の場所，保存先など，自分の環境だけで変えたい値は `config.yaml` を直接編集せず，
+`nyx660_script/config.local.yaml` に書いてください．このファイルは git 管理外で，存在すれば `config.yaml` にキー単位で上書きされます．
+
+```bash
+cp nyx660_script/config.local.yaml.example nyx660_script/config.local.yaml
+```
+
+```yaml
+# nyx660_script/config.local.yaml（変えたいキーだけを書く）
+model:
+  yolo_path: model/my_model.pt
+```
+
+優先順位は「CLI オプション・環境変数 > `config.local.yaml` > `config.yaml`」です．相対パスの基準は `config.yaml` と同じ `nyx660_script/` です．
 
 ## 使い方（GUI）
 

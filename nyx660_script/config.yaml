@@ -32,7 +32,7 @@ output:
   gear_ae_dir: ../data/gear_ae        # tools/gear_ae/ の実行ログ・検出キャッシュの保存先
 
 model:
-  yolo_path: model/260727_pepper_yolo26x_best.pt          # config.yaml からの相対パス
+  yolo_path: model/best.pt  # config.yaml からの相対パス
   confidence_threshold: 0.5
 
 pointcloud:

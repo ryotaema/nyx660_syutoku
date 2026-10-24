@@ -1,0 +1,11 @@
+# 環境ごとの上書き設定の例．
+# このファイルを config.local.yaml という名前でコピーし，変えたいキーだけを書く．
+# config.local.yaml は git 管理外で，config.yaml にキー単位でマージされる．
+# 相対パスの基準は config.yaml と同じ（このファイルのあるディレクトリ）．
+
+model:
+  yolo_path: model/my_model.pt
+
+# sdk_path: ../../ScepterSDK
+# output:
+#   images_dir: ~/data/images

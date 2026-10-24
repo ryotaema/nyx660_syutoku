@@ -5,6 +5,9 @@ RealSense_vs_NYX660.md
 # YOLO モデル
 nyx660_script/model/
 
+# 環境ごとの上書き設定（config.local.yaml.example を参照）
+nyx660_script/config.local.yaml
+
 # データ（ディレクトリ構造は .gitkeep で保持）
 data/**
 !data/**/

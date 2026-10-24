@@ -25,11 +25,26 @@ from datetime import datetime
 from ctypes import c_uint8, c_int32, c_uint16, c_bool
 
 _CFG_PATH = Path(__file__).parent / "config.yaml"
+# 環境ごとの上書き設定（git 管理外）．存在すれば config.yaml に深くマージする
+_LOCAL_CFG_PATH = Path(__file__).parent / "config.local.yaml"
+
+
+def _deep_merge(base, override):
+    """override の値で base を再帰的に上書きする（dict 同士はキー単位でマージ）．"""
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _deep_merge(base[key], value)
+        else:
+            base[key] = value
+    return base
 
 
 def load_config():
     with open(_CFG_PATH) as f:
         cfg = yaml.safe_load(f)
+    if _LOCAL_CFG_PATH.exists():
+        with open(_LOCAL_CFG_PATH) as f:
+            _deep_merge(cfg, yaml.safe_load(f) or {})
     cfg_dir = _CFG_PATH.parent
     # sdk_path: 相対パスならconfig.yaml基準で解決
     p = os.environ.get('SCEPTER_SDK_PATH', cfg['sdk_path'])
