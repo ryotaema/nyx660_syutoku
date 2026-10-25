@@ -34,7 +34,7 @@ SDK本体はこのリポジトリに含まれていません．
 （`../../ScepterSDK`）はこの配置を前提にしているので，この通りに置けば設定の変更は不要です．
 
 ```
-<作業フォルダ>/            # 例: ~/annot_labelimg/Tof_camera/nyx660/
+<作業フォルダ>/            # 任意の場所 (例: ~/work/nyx660/)
 ├── nyx660_syutoku/        # このリポジトリ
 │   └── nyx660_script/
 │       └── config.yaml    # sdk_path: ../../ScepterSDK → <作業フォルダ>/ScepterSDK
