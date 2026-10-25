@@ -102,6 +102,8 @@ def build_parser(include_model=False):
     p.add_argument('--tag', type=str, default=None, metavar='NAME',
                    help='セッションディレクトリ名に付ける任意タグ 例: greenhouse'
                         '（ファイル名には付かない）')
+    p.add_argument('--serial', type=str, default=None, metavar='SERIAL',
+                   help='使うカメラのシリアル番号（複数台接続時。統合GUIから渡される）')
     return p
 
 
@@ -117,6 +119,8 @@ def apply_args(cfg, args):
             print(f"警告: --color-size の形式が不正です（例: 800x600）。デフォルト値を使用します。")
     if getattr(args, 'model', None) is not None:
         cfg.setdefault('model', {})['yolo_path'] = args.model
+    if getattr(args, 'serial', None):
+        cfg['camera']['serial'] = args.serial
     return cfg
 
 
@@ -437,7 +441,16 @@ def open_camera(cfg):
     ret, infolist = cam.scGetDeviceInfoList(count)
     if ret != 0:
         raise RuntimeError(f"scGetDeviceInfoList failed: {ret}")
-    info = infolist[0]
+    infolist = infolist[:count]
+    serial = cfg['camera'].get('serial')
+    if serial:
+        matched = [i for i in infolist if i.serialNumber.decode() == serial]
+        if not matched:
+            found = ', '.join(i.serialNumber.decode() for i in infolist)
+            raise RuntimeError(f"シリアル {serial} のNYX660が見つかりません（検出: {found}）")
+        info = matched[0]
+    else:
+        info = infolist[0]
     print(f"デバイス: {info.serialNumber.decode()}  IP: {info.ip.decode()}")
 
     ret = cam.scOpenDeviceBySN(info.serialNumber)

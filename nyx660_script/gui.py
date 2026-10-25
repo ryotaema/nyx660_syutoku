@@ -66,6 +66,7 @@ class App:
         self.root = root
         self.proc = None
         self.out_kind = 'images'
+        self.cameras = []
         self.model_path = str(ROOT / CFG.get('model', {}).get('yolo_path', 'model/best.pt'))
         self.log_q = queue.Queue()
 
@@ -86,7 +87,8 @@ class App:
 
         ttk.Label(f, text='カメラ', width=8).grid(row=0, column=0, sticky='w')
         self.cam_var = tk.StringVar(value='検出中...')
-        ttk.Label(f, textvariable=self.cam_var).grid(row=0, column=1, sticky='w')
+        self.cam_box = ttk.Combobox(f, textvariable=self.cam_var, state='readonly', width=48)
+        self.cam_box.grid(row=0, column=1, sticky='we')
         ttk.Button(f, text='再検出', command=self.refresh_camera).grid(row=0, column=2, padx=(6, 0))
 
         ttk.Label(f, text='タグ', width=8).grid(row=1, column=0, sticky='w', pady=(6, 0))
@@ -182,7 +184,7 @@ class App:
         """機能1つ分のボタンと説明。
 
         args   : 追加引数を返す関数（None を返したら中止）
-        camera : カメラを使う（--tag を渡し、未検出なら警告する）
+        camera : カメラを使う（--serial と --tag を渡す）
         """
         f = ttk.Frame(parent)
         f.pack(fill='x', pady=4)
@@ -211,28 +213,39 @@ class App:
     # ------------------------------------------------------------------ カメラ
     def refresh_camera(self):
         self.cam_var.set('検出中...（数秒かかります）')
-        self.camera_found = False
+        self.cam_box['values'] = ()
+        self.cameras = []
 
         def work():
             try:
                 r = subprocess.run([sys.executable, '-c', _DETECT, str(ROOT)], cwd=str(ROOT),
                                    capture_output=True, text=True, timeout=20)
                 devs = [l.split('\t')[1:] for l in r.stdout.splitlines() if l.startswith('DEV\t')]
-                err = None if r.returncode == 0 else (r.stderr.strip().splitlines() or ['不明なエラー'])[-1]
+                err = None if r.returncode == 0 else (r.stderr.strip() or '不明なエラー')
             except subprocess.TimeoutExpired:
-                devs, err = [], 'タイムアウト'
+                devs, err = [], 'タイムアウト（20秒）'
             self.root.after(0, lambda: self._set_camera(devs, err))
         threading.Thread(target=work, daemon=True).start()
 
     def _set_camera(self, devs, err):
-        self.camera_found = bool(devs)
-        if devs:
-            name, serial, ip = devs[0]
-            self.cam_var.set(f'{name}  (シリアル: {serial}  IP: {ip})')
+        self.cameras = [{'name': n, 'serial': s, 'ip': ip} for n, s, ip in devs]
+        self.cam_box['values'] = [f"{c['name']}  (シリアル: {c['serial']}  IP: {c['ip']})"
+                                  for c in self.cameras]
+        if self.cameras:
+            self.cam_box.current(0)
+            self._append(f'カメラを {len(self.cameras)} 台検出しました。\n')
         elif err:
-            self.cam_var.set(f'検出できません（SDK の場所 config.yaml の sdk_path を確認）: {err}')
+            self.cam_var.set('検出できません（詳細は下のログ）')
+            self._append('カメラの検索に失敗しました。config.yaml の sdk_path（SDK の場所）を'
+                         '確認してください。\n' + err + '\n')
         else:
-            self.cam_var.set('カメラが見つかりません（LAN 接続を確認して「再検出」）')
+            self.cam_var.set('カメラが見つかりません（詳細は下のログ）')
+            self._append('NYX660 が見つかりません。LAN 接続と PC 側の IP 設定を確認し、'
+                         '「再検出」を押してください。\n')
+
+    def _selected_serial(self):
+        i = self.cam_box.current()
+        return self.cameras[i]['serial'] if 0 <= i < len(self.cameras) else None
 
     # ------------------------------------------------------------------ 引数
     def _pc_args(self):
@@ -267,9 +280,11 @@ class App:
             return
         args = []
         if camera:
-            if not self.camera_found and not messagebox.askyesno(
-                    'カメラ未検出', 'NYX660 が検出されていません。このまま起動しますか？'):
+            serial = self._selected_serial()
+            if serial is None:
+                messagebox.showwarning('カメラがありません', 'カメラをつないで「再検出」を押してください。')
                 return
+            args += ['--serial', serial]
             if self.tag_var.get().strip():
                 args += ['--tag', self.tag_var.get().strip()]
         if args_fn is not None:
@@ -342,8 +357,27 @@ class App:
 
     def open_out(self):
         d = _out_dir(self.out_kind)
-        d.mkdir(parents=True, exist_ok=True)
-        subprocess.Popen(['xdg-open', str(d)])
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self._append(f'保存先を作成できません: {d}\n{exc}\n')
+            return
+
+        def work():
+            try:
+                result = subprocess.run(
+                    ['xdg-open', str(d)], stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, encoding='utf-8', errors='replace',
+                    check=False)
+            except OSError as exc:
+                self.log_q.put(f'保存先を開けません: {d}\n{exc}\n')
+                return
+            if result.returncode:
+                self.log_q.put(f'保存先を開けません: {d}\n'
+                               f'{result.stdout.strip()}\n'
+                               'Docker内ではファイルマネージャーと画面共有を確認してください。\n')
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _on_close(self):
         if self.proc is not None:
