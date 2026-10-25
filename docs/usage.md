@@ -2,22 +2,51 @@
 
 [README](../README.md) の「使い方」の補足です．保存されるファイルの形式は [data_format.md](data_format.md) を参照してください．
 
+## ディレクトリ構成
+
+```
+nyx660_syutoku/
+├── nyx660_script/
+│   ├── config.yaml
+│   ├── config.local.yaml.example     # 環境ごとの上書き設定の例（config.local.yaml にコピーして使う）
+│   ├── utils.py
+│   ├── gui.py                        # 統合GUI（各スクリプトをボタンで起動）
+│   ├── collect/
+│   │   ├── dataset_collect.py        # 連続収録（Enter 開始 / q 停止）
+│   │   ├── dataset_collect_photo.py  # 1ショット（s 保存 / q 終了）
+│   │   ├── dataset_point_collect.py  # 点群収集（auto / manual）
+│   │   └── timelapse_detect.py       # タイムラプス定期撮影（+ YOLO検出オプション）
+│   ├── detect/
+│   │   └── yolo_detection.py         # YOLO リアルタイム検出（ToF 距離表示付き）
+│   ├── record/
+│   │   ├── mp4_collect.py            # MP4 録画（color + depth colormap）
+│   │   └── record_with_yolo.py       # MP4 録画（YOLO + ToF 距離オーバーレイ）
+│   ├── process/
+│   │   ├── point_merge.py            # 点群 ICP 位置合わせ・マージ
+│   │   └── timelapse_analysis.py     # タイムラプスログのグラフ生成
+│   └── click_script/
+│       ├── bbox_click.py             # 画像に YOLO 形式 BBox を手動アノテーション
+│       └── click_dataset.py          # カメラ映像をクリックして座標＋画像を保存
+├── docs/                 # 詳しい説明（この資料など）
+├── tools/
+│   ├── rename_legacy.py     # 旧命名データを新命名規則へ変換（CLI）
+│   ├── rename_legacy_gui.py # 同上（GUI）
+│   └── convert_ply_to_m.py  # 旧形式（mm）の点群 PLY を m・RealSense Viewer 座標系へ変換
+└── data/
+    ├── images/           # 収集画像（YYMMDD/nyx_YYMMDD_HHMMSS/）
+    ├── pointcloud/       # 点群データ（YYMMDD/nyx_YYMMDD_HHMMSS/）
+    ├── timelapse_data/   # タイムラプスセッション（YYMMDD/nyx_YYMMDD_HHMMSS/）
+    └── mp4/              # 録画動画
+```
+
 ## GUI
 
 ```bash
 python3 nyx660_script/gui.py
 ```
 
-real_syutoku の GUI と同じ画面構成です．
-
-1. 上の「カメラ」に検出された NYX660（シリアル・IP）が表示されます．複数台つないでいるときはここで選びます．出ないときは LAN 接続を確認して「再検出」（原因は下のログに出ます）．
-2. やりたいことのタブ（画像・点群・動画・タイムラプス・推論・アノテーション）を開き，ボタンを押します．
-3. カメラ映像のウィンドウが開いたら，ボタン横の「操作」に書かれたキーで保存・終了します．
-4. 途中でやめたいときは「停止」を押します（データは保存されたまま安全に終了します）．
-5. 「保存先を開く」で，最後に使った機能の保存フォルダが開きます．
-
+画面の見方・タブとボタンごとの機能・困ったときの対処は [gui.md](gui.md) にまとめています．
 GUI は下記のスクリプトをボタンで起動しているだけなので，コマンドラインからも同じことができます．
-細かいオプション（FPS・color 解像度など）を変えたいときはコマンドラインか `config.yaml` を使ってください．
 
 ## RGB・深度・IR・PLYの一括取得
 

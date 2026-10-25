@@ -17,12 +17,15 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 ROOT = Path(__file__).resolve().parent
+GUIDE = ROOT.parent / 'docs' / 'gui.md'
 sys.path.insert(0, str(ROOT))
 from utils import load_config
 
 CFG = load_config()
 
 # スクリプトをこれ経由で起動する。「停止」(SIGINT) 時に KeyboardInterrupt のトレースバックを出さない
+_DEFAULT = '既定（config.yaml）'
+
 _RUNNER = """\
 import runpy, sys
 sys.argv = sys.argv[1:]
@@ -58,6 +61,7 @@ def _out_dir(kind):
         'timelapse':  out['timelapse_dir'],
         'pointcloud': out['pointcloud_dir'],
         'mp4':        out['mp4_dir'],
+        'param_tune': out['param_tune_dir'],
     }[kind])
 
 
@@ -96,6 +100,23 @@ class App:
         ttk.Entry(f, textvariable=self.tag_var, width=24).grid(row=1, column=1, sticky='w', pady=(6, 0))
         ttk.Label(f, text='任意。保存フォルダ名の末尾に付きます（例: greenhouse）',
                   foreground='gray').grid(row=2, column=1, sticky='w')
+
+        ttk.Label(f, text='撮影設定', width=8).grid(row=3, column=0, sticky='w', pady=(6, 0))
+        s = ttk.Frame(f)
+        s.grid(row=3, column=1, sticky='w', pady=(6, 0))
+        cam = CFG['camera']
+        ttk.Label(s, text='カラー解像度').pack(side='left')
+        self.size_var = tk.StringVar(value=_DEFAULT)
+        # このカメラの Color は 640x480 / 1600x1200 の2モードだけ
+        ttk.Combobox(s, textvariable=self.size_var, width=16, state='readonly',
+                     values=[_DEFAULT, '640x480', '1600x1200']).pack(side='left', padx=(4, 12))
+        ttk.Label(s, text='FPS').pack(side='left')
+        self.fps_var = tk.StringVar(value=_DEFAULT)
+        ttk.Combobox(s, textvariable=self.fps_var, width=16,
+                     values=[_DEFAULT, '5', '10', '15', '30']).pack(side='left', padx=(4, 0))
+        ttk.Label(f, text=f"既定は config.yaml の値（カラー {cam.get('color_width')}x{cam.get('color_height')}・"
+                          f"{cam.get('fps')} FPS）。深度は常に 640x480",
+                  foreground='gray').grid(row=4, column=1, sticky='w')
         f.columnconfigure(1, weight=1)
 
     def _build_tabs(self):
@@ -133,10 +154,13 @@ class App:
         self._task(t, '点群を撮る', '上の設定で点群を撮影します',
                    '自動: [Enter] 開始 / 手動: [s] 保存  [q] 終了',
                    'collect/dataset_point_collect.py', 'pointcloud', args=self._pc_args)
+        self.pc_seq = tk.BooleanVar(value=False)
+        ttk.Checkbutton(t, text='物体を回しながら撮った（前のフレームに順につなぐ。'
+                                'オフ: 物体は静止，全フレームを1枚目に合わせる）',
+                        variable=self.pc_seq).pack(anchor='w', pady=(10, 0))
         self._task(t, '点群をつなぎ合わせる', '撮影したフォルダを選んで、複数の点群を1つにまとめます',
                    'フォルダを選択', 'process/point_merge.py', 'pointcloud',
-                   args=lambda: self._ask_dir('pointcloud', '点群のセッションフォルダを選択'),
-                   camera=False)
+                   args=self._merge_args, camera=False)
 
         # --- 動画 ---
         t = self._tab(nb, '動画')
@@ -160,6 +184,9 @@ class App:
         ttk.Label(opt, text='時間撮影する').grid(row=0, column=3, sticky='w')
         ttk.Checkbutton(opt, text='YOLO検出もする（開始時にモデルを選択）',
                         variable=self.tl_detect).grid(row=1, column=0, columnspan=4, sticky='w', pady=(4, 0))
+        self.tl_relative = tk.BooleanVar(value=False)
+        ttk.Checkbutton(opt, text='深度の色を画面内の近い〜遠いで付ける（近距離だけを撮るとき向け）',
+                        variable=self.tl_relative).grid(row=2, column=0, columnspan=4, sticky='w')
         self._task(t, 'タイムラプスを開始', '上の設定で定点撮影します。止めるときは下の「停止」',
                    '「停止」で終了', 'collect/timelapse_detect.py', 'timelapse', args=self._tl_args)
         self._task(t, '検出結果をグラフにする', 'YOLO検出付きで撮ったフォルダを選んでグラフを作ります',
@@ -177,6 +204,16 @@ class App:
         self._task(t, 'BBoxアノテーション', '画像フォルダを選び、YOLO形式のラベルを付けます',
                    'フォルダを選択 → [d] 次へ  [s] 保存  [q] 終了', 'click_script/bbox_click.py', 'images',
                    camera=False)
+
+        # --- ツール ---
+        t = self._tab(nb, 'ツール')
+        self._task(t, '旧データの名前を変換', '旧命名のデータを今の命名規則に揃えます（別ウィンドウで確認してから実行）',
+                   'ウィンドウ内で操作', '../tools/rename_legacy_gui.py', 'images', camera=False)
+        self._task(t, '旧形式の点群を変換', '2026年10月より前の PLY（mm 単位）を今の形式（m 単位）にします',
+                   'フォルダを選択 → 確認 → 実行', '../tools/convert_ply_to_m.py', 'pointcloud',
+                   args=self._ply_convert_args, camera=False)
+        self._task(t, 'カメラパラメータ調整', '露光などを振って撮り比べ、検出結果で比較します（別ウィンドウ）',
+                   'ウィンドウ内で操作', '../tools/param_tune/param_sweep_gui.py', 'param_tune', camera=False)
 
     def _tab(self, nb, title):
         f = ttk.Frame(nb, padding=12)
@@ -206,6 +243,7 @@ class App:
         self.status = tk.StringVar(value='待機中')
         ttk.Label(bar, textvariable=self.status).pack(side='left')
         ttk.Button(bar, text='保存先を開く', command=self.open_out).pack(side='right')
+        ttk.Button(bar, text='使い方', command=lambda: self._xdg_open(GUIDE)).pack(side='right', padx=(0, 6))
         self.stop_btn = ttk.Button(bar, text='停止', command=self.stop, state='disabled')
         self.stop_btn.pack(side='right', padx=6)
 
@@ -260,8 +298,39 @@ class App:
         return a
 
     def _tl_args(self):
-        return ['--interval', str(int(self.tl_interval.get()) * 60),
-                '--duration', str(self.tl_hours.get())] + (['--detect'] if self.tl_detect.get() else [])
+        return (['--interval', str(int(self.tl_interval.get()) * 60), '--duration', str(self.tl_hours.get())]
+                + (['--detect'] if self.tl_detect.get() else [])
+                + (['--relative-depth'] if self.tl_relative.get() else []))
+
+    def _merge_args(self):
+        d = self._ask_dir('pointcloud', '点群のセッションフォルダを選択')
+        return d and d + (['--sequential'] if self.pc_seq.get() else [])
+
+    def _ply_convert_args(self):
+        d = filedialog.askdirectory(title='変換する点群のフォルダを選択（データルートでも可）',
+                                    initialdir=str(_out_dir('pointcloud')), mustexist=True)
+        if not d:
+            return None
+        if messagebox.askyesno('旧形式の点群を変換',
+                               'すぐに変換しますか？\n\n'
+                               '「はい」: 変換する（元のファイルは *.ply.mm_bak として残ります）\n'
+                               '「いいえ」: 何が変換されるかをログに表示するだけ'):
+            return [d, '--apply']
+        return [d]
+
+    def _capture_args(self):
+        """撮影設定（カラー解像度・FPS）。既定なら何も渡さない。不正なら None。"""
+        a = []
+        size = self.size_var.get()
+        if size and size != _DEFAULT:
+            a += ['--color-size', size]
+        fps = self.fps_var.get().strip()
+        if fps and fps != _DEFAULT:
+            if not fps.isdigit() or not 1 <= int(fps) <= 30:
+                messagebox.showwarning('撮影設定', f'FPS は 1〜30 の整数で入力してください: {fps}')
+                return None
+            a += ['--fps', fps]
+        return a
 
     def _model_args(self):
         p = filedialog.askopenfilename(
@@ -288,6 +357,10 @@ class App:
                 messagebox.showwarning('カメラがありません', 'カメラをつないで「再検出」を押してください。')
                 return
             args += ['--serial', serial]
+            capture = self._capture_args()
+            if capture is None:
+                return
+            args += capture
             if self.tag_var.get().strip():
                 args += ['--tag', self.tag_var.get().strip()]
         if args_fn is not None:
@@ -296,7 +369,7 @@ class App:
                 return
             args += extra
 
-        cmd = [sys.executable, '-u', '-c', _RUNNER, str(ROOT / script)] + args
+        cmd = [sys.executable, '-u', '-c', _RUNNER, str((ROOT / script).resolve())] + args
         self._append(f"\n$ python3 {script} {' '.join(args)}\n")
         self.proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
@@ -365,7 +438,10 @@ class App:
         except OSError as exc:
             self._append(f'保存先を作成できません: {d}\n{exc}\n')
             return
+        self._xdg_open(d)
 
+    def _xdg_open(self, d):
+        """フォルダやファイルを既定のアプリで開く。失敗したらログに出す。"""
         def work():
             try:
                 result = subprocess.run(
@@ -373,10 +449,10 @@ class App:
                     stderr=subprocess.STDOUT, encoding='utf-8', errors='replace',
                     check=False)
             except OSError as exc:
-                self.log_q.put(f'保存先を開けません: {d}\n{exc}\n')
+                self.log_q.put(f'開けません: {d}\n{exc}\n')
                 return
             if result.returncode:
-                self.log_q.put(f'保存先を開けません: {d}\n'
+                self.log_q.put(f'開けません: {d}\n'
                                f'{result.stdout.strip()}\n'
                                'Docker内ではファイルマネージャーと画面共有を確認してください。\n')
 
