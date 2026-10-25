@@ -1,5 +1,5 @@
 # リポジトリとSDKを同じ親ディレクトリに置く場合。このconfig.yamlからの相対パス。
-# 別の配置では変更するか、SCEPTER_SDK_PATHで上書きする（README「SDK」参照）。
+# 別の配置では変更するか、SCEPTER_SDK_PATHで上書きする（docs/setup.md「SDK」参照）。
 sdk_path: ../../ScepterSDK
 
 camera:
