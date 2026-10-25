@@ -9,7 +9,8 @@ from pathlib import Path
 import cv2
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from utils import (load_config, build_parser, apply_args, init_sdk, open_camera, close_camera,
-                   make_depth_colormap, save_intrinsics, camera_metadata, PLY_FORMAT)
+                   make_depth_colormap, save_intrinsics, camera_metadata, PLY_FORMAT,
+                   UNDISTORT_HINT)
 from snapshot import create_session, SnapshotReader, save_frame_bundle, preview_grid
 
 
@@ -39,7 +40,7 @@ def main():
         from API.ScepterDS_enums import ScFrameType
         camera = open_camera(cfg)
         session = create_session(cfg['output']['images_dir'], 'nyx', args.tag)
-        save_intrinsics(camera, str(session.dir))
+        intrinsics = save_intrinsics(camera, str(session.dir))
         preset = cfg['camera'].get('params_json')
         if args.all_data and preset:
             shutil.copyfile(preset, session.dir / 'camera_parameters.json')
@@ -52,11 +53,13 @@ def main():
                         depth_aligned_to=None, unavailable_modalities=['ir_right'],
                         frame_pairing='latest RGB/depth/IR within max_frame_age_ms; see hardware timestamps')
         if args.all_data:
-            metadata['ply_format'] = dict(PLY_FORMAT, color=False)
+            metadata['ply_format'] = dict(PLY_FORMAT, color=True)
         reader = SnapshotReader(ScFrameType, cfg['camera'].get('fps', 30), include_pointcloud=args.all_data, require_ir=args.all_data)
         metadata['max_frame_age_ms'] = reader.max_age * 1000
         alpha = cfg['camera'].get('depth_alpha', 0.4)
         print(f'保存先: {session.dir}', flush=True)
+        if args.all_data:
+            print(UNDISTORT_HINT, flush=True)
         label = '全データ（PLY含む）' if args.all_data else '画像（PLYなし）'
         print(f'{label}を保存します。[s] 保存  [q] 終了', flush=True)
         begin = last_frame = time.monotonic()
@@ -82,7 +85,8 @@ def main():
             if time.monotonic() - begin < args.warmup:
                 continue
             if args.once or key == ord('s'):
-                record = save_frame_bundle(session, len(frames_meta) + 1, frame, depth_cm, all_data=args.all_data)
+                record = save_frame_bundle(session, len(frames_meta) + 1, frame, depth_cm, all_data=args.all_data,
+                                           intrinsics=intrinsics)
                 record['saved_at'] = datetime.now(timezone.utc).isoformat()
                 frames_meta.append(record)
                 metadata.update(camera=camera_metadata(camera, cfg,

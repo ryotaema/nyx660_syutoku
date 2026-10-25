@@ -586,6 +586,7 @@ def save_intrinsics(cam, save_dir):
     }
     with open(os.path.join(save_dir, 'intrinsics.json'), 'w') as f:
         json.dump(intrinsics_data, f, indent=2)
+    return intrinsics_data
 
 
 def extract_depth(frame):
@@ -635,26 +636,208 @@ def get_bbox_depth(depth, x1, y1, x2, y2):
 # （2026-10-23 実機確認: 画像上端の点が y<0、z は depth 画像の値と一致）。
 # 2026-10 より前の nyx の PLY は SDK のまま（mm・OpenCV 系）。tools/convert_ply_to_m.py で変換できる。
 PLY_FORMAT = {'unit': 'm', 'axes': 'realsense_viewer'}
+
+# PLY を保存するスクリプトが表示する案内（SDK の点群は ToF レンズの歪み未補正のまま保存している）
+UNDISTORT_HINT = ('注: PLY の座標は SDK の値のまま（ToF レンズの歪み未補正。画面の端ほど横にずれる）です。\n'
+                  '    形の正確さが必要なら，GUI の「ツール」タブ →「点群の歪みを補正」'
+                  '（python3 tools/undistort_ply.py <フォルダ> --apply）で補正できます。')
 _SDK_TO_PLY = np.array([0.001, -0.001, -0.001], dtype=np.float32)
 
 
-def save_ply(path, pointlist, count):
+def save_ply(path, pointlist, count, color=None, intrinsics=None, aligned=False):
     """ScVector3f のリスト（SDK の点群）をバイナリ PLY として保存（z==0 / z==65535 は除外）。
-    座標は PLY_FORMAT（m・RealSense Viewer 座標系）に変換して書く。"""
+    座標は PLY_FORMAT（m・RealSense Viewer 座標系）に変換して書く。
+    color（BGR 画像）と intrinsics（save_intrinsics() の戻り値）を渡すと，各点に色を付ける
+    （aligned: color が depth に位置合わせ済みの 640x480 画像の場合）。"""
     pts = np.frombuffer(pointlist, dtype='<f4', count=count * 3).reshape(-1, 3)
-    pts = pts[(pts[:, 2] != 0) & (pts[:, 2] != 65535)] * _SDK_TO_PLY
+    pts = pts[(pts[:, 2] != 0) & (pts[:, 2] != 65535)]
+    rgb = None
+    if color is not None and intrinsics is not None:
+        rgb = point_colors(pts, color, intrinsics, aligned=aligned)
+    write_ply(path, pts * _SDK_TO_PLY, rgb)
+
+
+def write_ply(path, points, rgb=None):
+    """(N,3) の点（PLY_FORMAT の座標）と (N,3) uint8 RGB をバイナリ PLY として保存する。"""
+    pts = np.asarray(points, dtype='<f4').reshape(-1, 3)
+    header = ("ply\n"
+              "format binary_little_endian 1.0\n"
+              f"element vertex {len(pts)}\n"
+              "property float x\n"
+              "property float y\n"
+              "property float z\n")
+    if rgb is None:
+        body = pts.tobytes()
+    else:
+        header += ("property uchar red\n"
+                   "property uchar green\n"
+                   "property uchar blue\n")
+        rec = np.empty(len(pts), dtype=[('xyz', '<f4', 3), ('rgb', 'u1', 3)])
+        rec['xyz'] = pts
+        rec['rgb'] = rgb
+        body = rec.tobytes()
     with open(path, 'wb') as f:
-        header = (
-            "ply\n"
-            "format binary_little_endian 1.0\n"
-            f"element vertex {len(pts)}\n"
-            "property float x\n"
-            "property float y\n"
-            "property float z\n"
-            "end_header\n"
-        )
-        f.write(header.encode('ascii'))
-        f.write(pts.astype('<f4').tobytes())
+        f.write((header + "end_header\n").encode('ascii'))
+        f.write(body)
+
+
+_RAY_CACHE = {}
+
+
+def _tof_rays(tof, size=(640, 480)):
+    """ToF の各画素の，歪みを補正した向き (x/z, y/z) の表 (H, W, 2)。内部パラメータごとに1回だけ計算する。"""
+    keys = ('fx', 'fy', 'cx', 'cy', 'k1', 'k2', 'p1', 'p2', 'k3', 'k4', 'k5', 'k6')
+    cache_key = tuple(tof[k] for k in keys) + size
+    if cache_key not in _RAY_CACHE:
+        W, H = size
+        K = np.array([[tof['fx'], 0, tof['cx']], [0, tof['fy'], tof['cy']], [0, 0, 1]], dtype=np.float64)
+        u, v = np.meshgrid(np.arange(W, dtype=np.float64), np.arange(H, dtype=np.float64))
+        pix = np.stack([u.ravel(), v.ravel()], -1).reshape(-1, 1, 2)
+        und = cv2.undistortPoints(pix, K, np.array([tof[k] for k in keys[4:]], dtype=np.float64))
+        _RAY_CACHE[cache_key] = und.reshape(H, W, 2)
+    return _RAY_CACHE[cache_key]
+
+
+_PLY_XYZ = ['property float x', 'property float y', 'property float z']
+_PLY_RGB = ['property uchar red', 'property uchar green', 'property uchar blue']
+
+
+def read_ply(path):
+    """write_ply() 形式の PLY（binary little endian・float x/y/z，任意で uchar red/green/blue）を読む。
+    戻り値: (points (N,3) float32, rgb (N,3) uint8 | None)。対象外の形式なら None。"""
+    with open(path, 'rb') as f:
+        data = f.read()
+    end = data.find(b'end_header\n')
+    if end < 0:
+        return None
+    header = data[:end].decode('ascii', errors='replace').splitlines()
+    if 'format binary_little_endian 1.0' not in header:
+        return None
+    props = [l for l in header if l.startswith('property')]
+    vert = [l for l in header if l.startswith('element vertex')]
+    if len(vert) != 1 or any(l.startswith('element') and not l.startswith('element vertex') for l in header):
+        return None
+    n = int(vert[0].split()[-1])
+    body = data[end + len('end_header\n'):]
+    if props == _PLY_XYZ:
+        return np.frombuffer(body, dtype='<f4', count=n * 3).reshape(-1, 3), None
+    if props == _PLY_XYZ + _PLY_RGB:
+        rec = np.frombuffer(body, dtype=[('xyz', '<f4', 3), ('rgb', 'u1', 3)], count=n)
+        return rec['xyz'], rec['rgb']
+    return None
+
+
+# 色が分からない点（カラー画像の外・カラーカメラから見て手前の物に隠れる点）の色
+UNKNOWN_COLOR = (128, 128, 128)
+
+
+def undistort_points(points_mm, tof):
+    """SDK の点群（mm・ToF レンズの歪み未補正）の x, y を，歪みを補正した位置に直した (N,3) を返す。
+
+    SDK の点は ToF の fx,fy,cx,cy で投影すると元の画素に戻るので，その画素の補正済みの向き × z にする。
+    z（深度）は変えない。ToF 画像（640x480）の外に写る点はそのまま。
+    """
+    pts = np.array(points_mm, dtype=np.float64).reshape(-1, 3)
+    z = pts[:, 2]
+    tu = np.round(pts[:, 0] / z * tof['fx'] + tof['cx']).astype(np.int64)
+    tv = np.round(pts[:, 1] / z * tof['fy'] + tof['cy']).astype(np.int64)
+    rays = _tof_rays(tof)
+    th, tw = rays.shape[:2]
+    on = (tu >= 0) & (tu < tw) & (tv >= 0) & (tv < th)
+    pts[on, :2] = rays[tv[on], tu[on]] * z[on, None]
+    return pts
+
+
+def is_sdk_raw_points(points_mm, tof, sample=5000):
+    """点が SDK の値のまま（歪み未補正）か。ToF の fx,fy,cx,cy で投影して画素にぴったり戻る点が大半なら True。"""
+    pts = np.asarray(points_mm, dtype=np.float64).reshape(-1, 3)
+    if len(pts) > sample:
+        pts = pts[np.linspace(0, len(pts) - 1, sample).astype(np.int64)]
+    u = pts[:, 0] / pts[:, 2] * tof['fx'] + tof['cx']
+    v = pts[:, 1] / pts[:, 2] * tof['fy'] + tof['cy']
+    on_pixel = (np.abs(u - np.round(u)) < 0.01) & (np.abs(v - np.round(v)) < 0.01)
+    return bool(on_pixel.mean() > 0.9)
+
+
+def point_colors(points_mm, color_bgr, intrinsics, aligned=False, undistorted=False):
+    """SDK 座標（mm・ToF カメラ基準・x右/y下/z前）の点 (N,3) をカラー画像に投影し，
+    各点の色 (N,3) uint8 RGB を返す。
+
+    SDK の点群（scConvertDepthFrameToPointCloudVector）は ToF レンズの歪みを補正していない
+    （点を ToF の fx,fy,cx,cy で投影すると元の画素にぴったり戻る。2026-10-25 実機確認）。
+    そのため点を一度 ToF の画素に戻し，歪みを補正した向きで 3D に戻してから
+    外部パラメータ（ToF→カラー，平行移動は mm）でカラーカメラ基準に移して投影する。
+    補正しないと画面の端ほど色がずれる（SDK の位置合わせ結果との色の差が約2倍になった）。
+    ToF とカラーは約3cm離れているので，カラーから見て手前の物に隠れる点が出る。
+    それらは z-buffer で見つけて UNKNOWN_COLOR にする（手前の物の色が背景に写り込むのを防ぐ）。
+    aligned=True の場合，color は SDK が ToF の画素に位置合わせした 640x480 画像なので，
+    点の ToF 画素の色をそのまま使う。
+    undistorted=True は，点がすでに歪み補正済み（tools/undistort_ply.py の後）の場合。
+    """
+    pts = np.asarray(points_mm, dtype=np.float64).reshape(-1, 3)
+    t = intrinsics['tof']
+    if not aligned:
+        return _project_colors(pts if undistorted else undistort_points(pts, t), color_bgr, intrinsics)
+
+    # 位置合わせ済みのカラーは ToF の画素と同じ並びなので，点の ToF 画素の色を使う
+    K = np.array([[t['fx'], 0, t['cx']], [0, t['fy'], t['cy']], [0, 0, 1]], dtype=np.float64)
+    dist = np.array([t[k] for k in ('k1', 'k2', 'p1', 'p2', 'k3', 'k4', 'k5', 'k6')], dtype=np.float64)
+    if undistorted:   # 補正済みの点は歪みを付け直すと元の画素に戻る
+        uv, _ = cv2.projectPoints(pts.reshape(-1, 1, 3), np.zeros(3), np.zeros(3), K, dist)
+    else:             # SDK の点は歪みなしで投影すると元の画素に戻る
+        uv, _ = cv2.projectPoints(pts.reshape(-1, 1, 3), np.zeros(3), np.zeros(3), K, None)
+    tu = np.round(uv[:, 0, 0]).astype(np.int64)
+    tv = np.round(uv[:, 0, 1]).astype(np.int64)
+    H, W = color_bgr.shape[:2]
+    rgb = np.empty((len(pts), 3), dtype=np.uint8)
+    rgb[:] = UNKNOWN_COLOR
+    ok = (tu >= 0) & (tu < W) & (tv >= 0) & (tv < H)
+    rgb[ok] = color_bgr[tv[ok], tu[ok]][:, ::-1]
+    return rgb
+
+
+def _project_colors(pts, color_bgr, intrinsics):
+    """歪み補正済みの ToF 基準の点 (N,3) [mm] をカラー画像に投影して色を拾う（point_colors の本体）。"""
+    t = intrinsics['tof']
+    p = intrinsics['color']
+    dist = [p[k] for k in ('k1', 'k2', 'p1', 'p2', 'k3')]
+    ex = intrinsics['extrinsics']
+    R = np.asarray(ex['rotation'], dtype=np.float64).reshape(3, 3)
+    pc = pts @ R.T + np.asarray(ex['translation'], dtype=np.float64)
+
+    rgb = np.empty((len(pts), 3), dtype=np.uint8)
+    rgb[:] = UNKNOWN_COLOR
+    front = pc[:, 2] > 1.0
+    if not front.any():
+        return rgb
+    idx = np.flatnonzero(front)
+    # cv2.projectPoints と同じ計算（numpy の方が数倍速い）
+    k1, k2, p1, p2, k3 = dist
+    x = pc[idx, 0] / pc[idx, 2]
+    y = pc[idx, 1] / pc[idx, 2]
+    r2 = x * x + y * y
+    radial = 1 + r2 * (k1 + r2 * (k2 + r2 * k3))
+    xd = x * radial + 2 * p1 * x * y + p2 * (r2 + 2 * x * x)
+    yd = y * radial + p1 * (r2 + 2 * y * y) + 2 * p2 * x * y
+    u = np.round(xd * p['fx'] + p['cx']).astype(np.int64)
+    v = np.round(yd * p['fy'] + p['cy']).astype(np.int64)
+    H, W = color_bgr.shape[:2]
+    inside = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+    idx, u, v = idx[inside], u[inside], v[inside]
+    z = pc[idx, 2]
+
+    # 隠れ判定: ToF の点の間隔より少し大きいマスごとに一番手前の z を求め，それより奥の点は隠れているとする
+    cell = max(1, int(np.ceil(1.5 * p['fx'] / t['fx'])))
+    gw = W // cell + 1
+    key = (v // cell) * gw + (u // cell)
+    zmin = np.full((H // cell + 1) * gw, np.inf)
+    order = np.argsort(-z)
+    zmin[key[order]] = z[order]   # 奥から順に書くので，最後に残るのが一番手前（np.minimum.at より速い）
+    visible = z <= zmin[key] + np.maximum(15.0, 0.02 * zmin[key])
+
+    idx, u, v = idx[visible], u[visible], v[visible]
+    rgb[idx] = color_bgr[v, u][:, ::-1]
+    return rgb
 
 
 def write_ply_points(path, points_xyz):

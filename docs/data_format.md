@@ -84,12 +84,16 @@ python3 collect/dataset_collect_photo.py --tag greenhouse
 | 深度可視化 | `depth_colormap/*_dc.jpg` | プレビュー用の疑似カラー画像 |
 | IR | `ir/*_i1.png` | 単眼IRの8bit PNG |
 | IR可視化 | `ir_color/*_i1c.jpg` | IRの疑似カラー画像 |
-| 点群 | `pointcloud/*_pc.ply` | 無効深度を除いた点群．単位m，RealSense Viewer座標系（x右・y上・前方−z） |
+| 点群 | `pointcloud/*_pc.ply` | 無効深度を除いた点群（RGB 付き）．単位m，RealSense Viewer座標系（x右・y上・前方−z） |
 | カメラ情報 | `intrinsics.json` / `camera_settings.json` | 内部パラメータ・撮影設定 |
 | 取得記録 | `metadata.json` | 機種・シリアル番号・保存ファイル・フレーム番号・取得時刻・画像サイズ |
 
 RGB・深度・IRはネイティブの解像度と座標系で保存します（プレビューだけを縮小します）．
-PLYはSDKが深度から変換したXYZ点群で，RGBは別ファイルに保存します．
+PLYはSDKが深度から変換したXYZ点群に，カラー画像の色（red/green/blue）を付けたものです．
+各点をカラーカメラに投影して色を拾います（ToF レンズの歪みを補正し，ToF→カラーの外部パラメータで移してから投影）．
+カラーの画角の外や，カラーカメラから見て手前の物に隠れる点は灰色（128, 128, 128）になります．
+2026-10-25 より前の PLY は色を持たないので，[点群に色を付ける](legacy_conversion.md#点群に色を付ける) で後から付けられます．
+座標は SDK の値のまま（ToF レンズの歪み未補正）です．形の正確さが必要なら [点群の歪みを補正](legacy_conversion.md#点群の歪みを補正) で直せます（補正すると `metadata.json` の `ply_format` に `"undistorted": true` が付きます）．
 `intrinsics.json` にはToF・カラーの内部パラメータと両センサー間の外部パラメータが入ります．
 設定JSONを使う場合は，原本も `camera_parameters.json` にコピーします．
 
@@ -112,7 +116,7 @@ point_merge.py がセッション直下を走査するため，フラットに�
 pointcloud_dir/YYMMDD/nyx_YYMMDD_HHMMSS/
 ├── {prefix}_00001_c.jpg
 ├── {prefix}_00001_d.png     # 16bit PNG（mm単位）
-├── {prefix}_00001_pc.ply    # バイナリ PLY（m 単位・RealSense Viewer 座標系，z=0 / z=65535 除外済み）
+├── {prefix}_00001_pc.ply    # バイナリ PLY（RGB 付き・m 単位・RealSense Viewer 座標系，z=0 / z=65535 除外済み）
 ├── intrinsics.json          # ToF / Color 内部パラメータ + 外部パラメータ
 └── metadata.json            # 取得モード・フレーム数・hardwaretimestamp 一覧・ply_format
 ```
@@ -121,7 +125,8 @@ pointcloud_dir/YYMMDD/nyx_YYMMDD_HHMMSS/
 
 **点群 PLY の形式は real_syutoku と共通**です：単位は **m**，座標系は RealSense Viewer と同じ
 （x 右・y 上・カメラ前方が **-z**）．SDK の点群（mm・x 右・y 下・z 前方）を保存時に変換しています．
-`metadata.json` の `ply_format` に `{"unit": "m", "axes": "realsense_viewer"}` が記録されます．
+`metadata.json` の `ply_format` に `{"unit": "m", "axes": "realsense_viewer", "color": true}` が記録されます．
+点群の見方は [pointcloud_viewer.md](pointcloud_viewer.md) を参照してください．
 `depth` の PNG は従来どおり mm 単位の 16bit です．
 
 2026年10月より前に保存した PLY は **mm・SDK の座標系のまま**です．混ぜて使う場合は

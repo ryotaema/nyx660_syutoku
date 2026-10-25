@@ -12,7 +12,7 @@ import numpy as np
 SCRIPT_ROOT = Path(__file__).resolve().parents[1] / 'nyx660_script'
 sys.path.insert(0, str(SCRIPT_ROOT))
 import snapshot
-from utils import Session
+from utils import Session, point_colors, UNKNOWN_COLOR, undistort_points, is_sdk_raw_points, read_ply, write_ply
 
 spec = importlib.util.spec_from_file_location('photo_capture', SCRIPT_ROOT / 'collect/dataset_collect_photo.py')
 photo = importlib.util.module_from_spec(spec)
@@ -190,9 +190,13 @@ class CaptureTests(unittest.TestCase):
             np.testing.assert_array_equal(cv2.imread(str(directory / files[name]), cv2.IMREAD_UNCHANGED), image)
         self.assertTrue((directory / 'intrinsics.json').is_file())
         self.assertEqual(metadata['ply_format']['unit'], 'm')
-        data = (directory / files['pointcloud']).read_bytes().split(b'end_header\n')[1]
-        vertices = np.frombuffer(data, dtype='<f4').reshape(-1, 3)
-        np.testing.assert_allclose(vertices, [[.1, -.2, -1], [.2, -.3, -2]])
+        self.assertTrue(metadata['ply_format']['color'])
+        header, data = (directory / files['pointcloud']).read_bytes().split(b'end_header\n')
+        self.assertIn(b'property uchar red', header)
+        vertices = np.frombuffer(data, dtype=[('xyz', '<f4', 3), ('rgb', 'u1', 3)])
+        np.testing.assert_allclose(vertices['xyz'], [[.1, -.2, -1], [.2, -.3, -2]])
+        # 模擬カメラの点はカラー画像（4x3）の外に写るので，色は「不明」の灰色
+        np.testing.assert_array_equal(vertices['rgb'], [UNKNOWN_COLOR] * 2)
         self.assertEqual(metadata['frames'][0]['streams']['depth']['frame_number'], 42)
 
     def test_failed_image_save_is_not_counted_and_camera_is_closed(self):
@@ -240,3 +244,81 @@ class CaptureTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class PointColorTests(unittest.TestCase):
+    INTR = {'tof': {'fx': 10., 'fy': 10., 'cx': 5., 'cy': 5., **{k: 0. for k in ['k1', 'k2', 'k3', 'k4', 'k5', 'k6', 'p1', 'p2']}},
+            'color': {'fx': 10., 'fy': 10., 'cx': 5., 'cy': 5., **{k: 0. for k in ['k1', 'k2', 'k3', 'p1', 'p2']}},
+            'extrinsics': {'rotation': [1, 0, 0, 0, 1, 0, 0, 0, 1], 'translation': [100., 0, 0]}}
+
+    def setUp(self):
+        self.color = np.zeros((10, 10, 3), np.uint8)
+        self.color[5, 6] = (255, 0, 0)    # BGR の青
+        self.color[5, 5] = (0, 0, 255)    # BGR の赤
+
+    def test_point_is_moved_to_color_camera_and_gets_rgb(self):
+        # x=0 の点は，カラーカメラから見ると 100mm 右にずれて u=5+10*100/1000=6 に写る
+        rgb = point_colors([[0, 0, 1000]], self.color, self.INTR)
+        np.testing.assert_array_equal(rgb, [[0, 0, 255]])
+
+    def test_aligned_color_uses_tof_pixels(self):
+        rgb = point_colors([[0, 0, 1000]], self.color, self.INTR, aligned=True)
+        np.testing.assert_array_equal(rgb, [[255, 0, 0]])
+
+    def test_hidden_and_outside_points_are_unknown(self):
+        # 2点目は1点目と同じ画素に写るがずっと奥 → 隠れている．3点目は画像の外
+        rgb = point_colors([[0, 0, 1000], [100, 0, 2000], [5000, 0, 1000]], self.color, self.INTR)
+        np.testing.assert_array_equal(rgb, [[0, 0, 255], UNKNOWN_COLOR, UNKNOWN_COLOR])
+
+
+class UndistortTests(unittest.TestCase):
+    TOF = {'fx': 500., 'fy': 500., 'cx': 320., 'cy': 240., 'k1': -0.1, 'k2': 0.05, 'p1': 0., 'p2': 0.,
+           'k3': 0., 'k4': 0., 'k5': 0., 'k6': 0.}
+
+    def sdk_points(self):
+        # SDK と同じく，画素を歪みなしのピンホールで 3D に戻した点
+        u, v = np.meshgrid(np.arange(0, 640, 40.), np.arange(0, 480, 40.))
+        z = np.full(u.size, 2000.)
+        return np.c_[(u.ravel() - 320) / 500 * z, (v.ravel() - 240) / 500 * z, z]
+
+    def test_undistort_matches_opencv_and_keeps_depth(self):
+        pts = self.sdk_points()
+        fixed = undistort_points(pts, self.TOF)
+        np.testing.assert_array_equal(fixed[:, 2], pts[:, 2])
+        pix = (pts[:, :2] / pts[:, 2:] * 500 + [320, 240]).reshape(-1, 1, 2)
+        K = np.array([[500, 0, 320], [0, 500, 240], [0, 0, 1.]])
+        ray = cv2.undistortPoints(pix, K, np.array([-0.1, 0.05, 0, 0, 0, 0, 0, 0.])).reshape(-1, 2)
+        np.testing.assert_allclose(fixed[:, :2], ray * 2000, atol=1e-6)
+        # 中心は動かず，端ほど動く
+        center = np.argmin(np.abs(pix.reshape(-1, 2) - [320, 240]).sum(1))
+        np.testing.assert_allclose(fixed[center], pts[center])
+        self.assertGreater(np.abs(fixed - pts).max(), 10)
+
+    def test_raw_points_are_detected_so_undistort_runs_once(self):
+        pts = self.sdk_points()
+        self.assertTrue(is_sdk_raw_points(pts, self.TOF))
+        self.assertFalse(is_sdk_raw_points(undistort_points(pts, self.TOF), self.TOF))
+
+    def test_colors_do_not_change_after_undistort(self):
+        intr = {'tof': self.TOF,
+                'color': {'fx': 500., 'fy': 500., 'cx': 320., 'cy': 240., 'k1': 0., 'k2': 0., 'p1': 0., 'p2': 0., 'k3': 0.},
+                'extrinsics': {'rotation': [1, 0, 0, 0, 1, 0, 0, 0, 1], 'translation': [30., 0, 0]}}
+        color = np.random.default_rng(0).integers(0, 255, (480, 640, 3), dtype=np.uint8)
+        pts = self.sdk_points()
+        before = point_colors(pts, color, intr)
+        after = point_colors(undistort_points(pts, self.TOF), color, intr, undistorted=True)
+        np.testing.assert_array_equal(before, after)
+        before = point_colors(pts, color, intr, aligned=True)
+        after = point_colors(undistort_points(pts, self.TOF), color, intr, aligned=True, undistorted=True)
+        np.testing.assert_array_equal(before, after)
+
+    def test_ply_round_trip_with_and_without_color(self):
+        with tempfile.TemporaryDirectory() as d:
+            pts = np.array([[1, 2, 3], [4, 5, 6]], np.float32)
+            rgb = np.array([[1, 2, 3], [250, 251, 252]], np.uint8)
+            write_ply(Path(d) / 'a.ply', pts)
+            write_ply(Path(d) / 'b.ply', pts, rgb)
+            p, c = read_ply(Path(d) / 'a.ply')
+            np.testing.assert_array_equal(p, pts); self.assertIsNone(c)
+            p, c = read_ply(Path(d) / 'b.ply')
+            np.testing.assert_array_equal(p, pts); np.testing.assert_array_equal(c, rgb)

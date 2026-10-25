@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import load_config, build_parser, apply_args, init_sdk, open_camera, close_camera
 from utils import extract_depth, extract_color, make_depth_colormap, save_ply, save_intrinsics, Session, camera_metadata
-from utils import PLY_FORMAT
+from utils import PLY_FORMAT, UNDISTORT_HINT
 
 _parser = build_parser()
 _parser.add_argument('--frames', type=int, default=None, metavar='N',
@@ -42,6 +42,7 @@ mode_label = f"auto ({capture_frames} frames)" if mode == 'auto' else "manual"
 print(f"保存先: {save_dir}")
 print(f"モード: {mode_label}")
 print(f"アライン: {'ON（colorをdepth座標系640x480に変換）' if align else 'OFF（raw、既定）'}")
+print(UNDISTORT_HINT)
 
 # --- カメラ初期化 ---
 try:
@@ -58,7 +59,7 @@ if align:
         print(f"警告: scSetTransformColorImgToDepthSensorEnabled failed: {ret}")
 
 # --- 内部パラメータ保存 ---
-save_intrinsics(cam, save_dir)
+intrinsics = save_intrinsics(cam, save_dir)
 
 # --- メタデータ初期化 ---
 _frames_meta = []
@@ -94,7 +95,7 @@ def save_frame(idx, cam):
     ret, pointlist = cam.scConvertDepthFrameToPointCloudVector(df)
     if ret == 0:
         save_ply(session.path(idx, 'pointcloud', ext='ply', sub=False),
-                 pointlist, df.width * df.height)
+                 pointlist, df.width * df.height, color=color, intrinsics=intrinsics, aligned=align)
 
     _frames_meta.append({'index': idx, 'hardwaretimestamp': int(hw_ts)})
     return True
@@ -123,7 +124,7 @@ def write_metadata(actual_frames):
         actual_frames=actual_frames,
         frames=_frames_meta,
         color_aligned_to_depth=align,
-        ply_format=PLY_FORMAT,
+        ply_format=dict(PLY_FORMAT, color=True),
     )
 
 

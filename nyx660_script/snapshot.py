@@ -121,7 +121,8 @@ class SnapshotReader:
 
 
 
-def save_frame_bundle(session, index, frame, depth_colormap, all_data=False):
+def save_frame_bundle(session, index, frame, depth_colormap, all_data=False, intrinsics=None):
+    """intrinsics（save_intrinsics() の戻り値）を渡すと，PLY の各点にカラー画像の色を付ける。"""
     from utils import save_ply
     images = {'color': (frame['color'], 'jpg'), 'depth': (frame['depth'], 'png'),
               'depth_colormap': (depth_colormap, 'jpg')}
@@ -130,7 +131,8 @@ def save_frame_bundle(session, index, frame, depth_colormap, all_data=False):
     if all_data:
         images.update(color_raw=(frame['color'], 'png'),
                       ir_color=(cv2.applyColorMap(frame['ir'], cv2.COLORMAP_JET), 'jpg'))
-    writer = (lambda path: save_ply(path, frame['points'], frame['depth'].size)) if all_data else None
+    writer = (lambda path: save_ply(path, frame['points'], frame['depth'].size,
+                                   color=frame['color'], intrinsics=intrinsics)) if all_data else None
     files = write_bundle(session, index, images, writer)
     return {'index': index, 'files': files, 'streams': frame['streams'],
             'frame_age_ms': frame['frame_age_ms'],

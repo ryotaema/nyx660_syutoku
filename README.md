@@ -46,6 +46,7 @@ python3 nyx660_script/gui.py
 | [docs/gui.md](docs/gui.md) | GUI の使い方（画面の見方，タブ・ボタンごとの機能，困ったとき） |
 | [docs/setup.md](docs/setup.md) | セットアップ詳細（SDK の配置，ネットワーク，`config.yaml` / `config.local.yaml`，Docker） |
 | [docs/usage.md](docs/usage.md) | GUI の詳細，コマンドラインでの使い方，CLI オプション一覧 |
+| [docs/pointcloud_viewer.md](docs/pointcloud_viewer.md) | 撮った点群（PLY）を CloudCompare で見る方法・色について |
 | [docs/data_format.md](docs/data_format.md) | ファイルの命名規則，保存されるフォルダ・ファイルの形式，カメラ仕様 |
 | [docs/legacy_conversion.md](docs/legacy_conversion.md) | 旧形式データ（点群の単位・旧ファイル名）の変換 |
 | [RealSense_vs_NYX660.md](RealSense_vs_NYX660.md) | RealSense との比較 |

@@ -17,6 +17,45 @@ python3 tools/convert_ply_to_m.py data --apply
 
 マージ結果（`*_merged_pc.ply`）は変換しないので，変換後に `point_merge.py` をやり直してください．
 
+## 点群に色を付ける
+
+2026-10-25 より前の PLY は座標（x, y, z）だけで色を持たず，CloudCompare などでは灰色で表示されます．
+同じ連番のカラー画像（`color_raw/*_cr.png`，無ければ `*_c.jpg`）とセッションの `intrinsics.json` から色を付けます．座標は変わりません．
+mm 単位の旧形式の PLY は，先に上の「旧形式の点群 PLY の変換」をしてください．
+
+GUI では「ツール」タブ →「点群に色を付ける」でフォルダを選びます．コマンドラインでは次のとおりです．
+
+```bash
+# 何に色が付くか確認（dry-run）
+python3 tools/colorize_ply.py data
+
+# 実行
+python3 tools/colorize_ply.py data --apply
+```
+
+マージ結果（`*_merged_pc.ply`）は対象外です．色を付けた後に `point_merge.py` をやり直すと，マージ結果にも色が付きます．
+
+## 点群の歪みを補正
+
+カメラの SDK が作る点群は ToF レンズの歪みを補正しておらず，撮影スクリプトはその値のまま PLY に保存します．
+画面の中心はほぼ正しいですが，端ほど横にずれます（補正した位置との差は中央値 約2cm，画面の端の遠い点で最大 約20cm）．
+形の正確さが必要なときは，このツールで座標を直します．深度（カメラからの距離）と色は変わりません．
+
+- SDK の値のままかどうかは点の並びから自動で判定するので，補正済みの PLY はスキップされます（二重に補正されません）．
+- セッションの `intrinsics.json` が必要です．mm 単位の旧形式は先に「旧形式の点群 PLY の変換」をしてください．
+- 補正前のファイルは `*.ply.raw_bak` として残ります（`--no-backup` で残さない）．
+- 補正した後は，`point_merge.py` をやり直すとマージ結果にも反映されます．
+
+GUI では「ツール」タブ →「点群の歪みを補正」でフォルダを選びます．コマンドラインでは次のとおりです．
+
+```bash
+# 何が補正されるか確認（dry-run）
+python3 tools/undistort_ply.py data
+
+# 実行
+python3 tools/undistort_ply.py data --apply
+```
+
 ## 旧命名データの変換
 
 2026年7月より前に取得した旧命名（`imageN_YYYY-MM-DD_HHMMSS_NYX660/` など）のデータは，

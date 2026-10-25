@@ -212,6 +212,12 @@ class App:
         self._task(t, '旧形式の点群を変換', '2026年10月より前の PLY（mm 単位）を今の形式（m 単位）にします',
                    'フォルダを選択 → 確認 → 実行', '../tools/convert_ply_to_m.py', 'pointcloud',
                    args=self._ply_convert_args, camera=False)
+        self._task(t, '点群に色を付ける', '色の無い（灰色で表示される）PLY に，同じショットのカラー画像の色を付けます',
+                   'フォルダを選択 → 確認 → 実行', '../tools/colorize_ply.py', 'pointcloud',
+                   args=self._colorize_args, camera=False)
+        self._task(t, '点群の歪みを補正', 'PLY の座標を ToF レンズの歪みを補正した位置に直します（形を正確にしたいとき）',
+                   'フォルダを選択 → 確認 → 実行', '../tools/undistort_ply.py', 'pointcloud',
+                   args=self._undistort_args, camera=False)
         self._task(t, 'カメラパラメータ調整', '露光などを振って撮り比べ、検出結果で比較します（別ウィンドウ）',
                    'ウィンドウ内で操作', '../tools/param_tune/param_sweep_gui.py', 'param_tune', camera=False)
 
@@ -315,6 +321,31 @@ class App:
                                'すぐに変換しますか？\n\n'
                                '「はい」: 変換する（元のファイルは *.ply.mm_bak として残ります）\n'
                                '「いいえ」: 何が変換されるかをログに表示するだけ'):
+            return [d, '--apply']
+        return [d]
+
+    def _colorize_args(self):
+        d = filedialog.askdirectory(title='色を付ける点群のフォルダを選択（データルートでも可）',
+                                    initialdir=str(_out_dir('pointcloud').parent), mustexist=True)
+        if not d:
+            return None
+        if messagebox.askyesno('点群に色を付ける',
+                               'すぐに色を付けますか？\n\n'
+                               '「はい」: 色を付けて PLY を書き直す（座標は変わりません）\n'
+                               '「いいえ」: どの PLY に色が付くかをログに表示するだけ'):
+            return [d, '--apply']
+        return [d]
+
+    def _undistort_args(self):
+        d = filedialog.askdirectory(title='歪みを補正する点群のフォルダを選択（データルートでも可）',
+                                    initialdir=str(_out_dir('pointcloud').parent), mustexist=True)
+        if not d:
+            return None
+        if messagebox.askyesno('点群の歪みを補正',
+                               'すぐに補正しますか？\n\n'
+                               '「はい」: 座標を補正して PLY を書き直す（元のファイルは *.ply.raw_bak として残ります。'
+                               '補正済みの PLY は自動でスキップ）\n'
+                               '「いいえ」: どの PLY が補正されるかをログに表示するだけ'):
             return [d, '--apply']
         return [d]
 
