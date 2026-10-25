@@ -1,4 +1,4 @@
-"""1ショットの各画像とPLYを、同じ番号でまとめて保存する。ROSは不要。"""
+"""1ショットの画像と任意のPLYを、同じ番号で保存する。ROSは不要。"""
 from datetime import datetime
 import os
 from pathlib import Path
@@ -24,11 +24,12 @@ def create_session(base_dir, cam, tag=None):
         return Session(base_dir, cam=cam, tag=tag, started_at=now)
 
 
-def write_bundle(session, index, images, pointcloud_writer):
-    """書き込み失敗を検出し、画像とPLYが揃ってから保存先へ移す。"""
+def write_bundle(session, index, images, pointcloud_writer=None):
+    """書き込み失敗を検出し、指定した画像・任意のPLYが揃ってから保存先へ移す。"""
     targets = {name: Path(session.path(index, name, ext=ext))
                for name, (_, ext) in images.items()}
-    targets['pointcloud'] = Path(session.path(index, 'pointcloud', ext='ply'))
+    if pointcloud_writer is not None:
+        targets['pointcloud'] = Path(session.path(index, 'pointcloud', ext='ply'))
     for path in targets.values():
         if path.exists():
             raise FileExistsError(f'既存データは上書きしません: {path}')
@@ -40,11 +41,12 @@ def write_bundle(session, index, images, pointcloud_writer):
             if not cv2.imwrite(str(path), image):
                 raise OSError(f'画像を書き込めません: {targets[name]}')
             staged[name] = path
-        path = Path(directory) / targets['pointcloud'].name
-        pointcloud_writer(str(path))
-        if not path.is_file() or path.stat().st_size == 0:
-            raise OSError('PLYを書き込めません')
-        staged['pointcloud'] = path
+        if pointcloud_writer is not None:
+            path = Path(directory) / targets['pointcloud'].name
+            pointcloud_writer(str(path))
+            if not path.is_file() or path.stat().st_size == 0:
+                raise OSError('PLYを書き込めません')
+            staged['pointcloud'] = path
         try:
             for name, path in staged.items():
                 os.replace(path, targets[name])
@@ -71,10 +73,12 @@ def preview_grid(color, depth_colormap, infrared):
 
 class SnapshotReader:
     """別タイミングで届くRGB・深度・IRを保持し、古い組み合わせは保存しない。"""
-    def __init__(self, frame_types, fps=30):
+    def __init__(self, frame_types, fps=30, include_pointcloud=True, require_ir=True):
         self.frame_types = frame_types
+        self.include_pointcloud = include_pointcloud
+        self.require_ir = require_ir
         self.max_age = max(0.25, 3.0 / fps)
-        self.cache = {}
+        self.cache = {'ir': None}
         self.updated = {}
         self.streams = {}
 
@@ -94,7 +98,7 @@ class SnapshotReader:
             if ret != 0:
                 continue
             self.cache[name] = extract(frame)
-            if name == 'depth':
+            if name == 'depth' and self.include_pointcloud:
                 ret, points = camera.scConvertDepthFrameToPointCloudVector(frame)
                 if ret != 0:
                     raise RuntimeError(f'PLY用の点群変換に失敗しました: {ret}')
@@ -105,21 +109,29 @@ class SnapshotReader:
                                   'frame_number': int(frame.frameIndex)}
         now = time.monotonic()
         if any(name not in self.updated or now - self.updated[name] > self.max_age
-               for name in ('color', 'depth', 'ir')):
+               for name in (('color', 'depth', 'ir') if self.require_ir else ('color', 'depth'))):
             return None
-        return dict(self.cache, streams={key: dict(value) for key, value in self.streams.items()},
-                    frame_age_ms={key: (now - value) * 1000 for key, value in self.updated.items()})
+        result = dict(self.cache)
+        if not self.require_ir and now - self.updated.get('ir', float('-inf')) > self.max_age:
+            result['ir'] = None
+        result['streams'] = {key: dict(value) for key, value in self.streams.items() if result.get(key) is not None}
+        result['frame_age_ms'] = {key: (now - value) * 1000 for key, value in self.updated.items()
+                                  if result.get(key) is not None}
+        return result
 
 
-def save_frame_bundle(session, index, frame, depth_colormap):
+
+def save_frame_bundle(session, index, frame, depth_colormap, all_data=False):
     from utils import save_ply
-    images = {'color': (frame['color'], 'jpg'), 'color_raw': (frame['color'], 'png'),
-              'depth': (frame['depth'], 'png'), 'depth_colormap': (depth_colormap, 'jpg'),
-              'ir': (frame['ir'], 'png'),
-              'ir_color': (cv2.applyColorMap(frame['ir'], cv2.COLORMAP_JET), 'jpg')}
-    count = frame['depth'].size
-    files = write_bundle(session, index, images,
-                         lambda path: save_ply(path, frame['points'], count))
+    images = {'color': (frame['color'], 'jpg'), 'depth': (frame['depth'], 'png'),
+              'depth_colormap': (depth_colormap, 'jpg')}
+    if frame['ir'] is not None:
+        images['ir'] = (frame['ir'], 'png' if all_data else 'jpg')
+    if all_data:
+        images.update(color_raw=(frame['color'], 'png'),
+                      ir_color=(cv2.applyColorMap(frame['ir'], cv2.COLORMAP_JET), 'jpg'))
+    writer = (lambda path: save_ply(path, frame['points'], frame['depth'].size)) if all_data else None
+    files = write_bundle(session, index, images, writer)
     return {'index': index, 'files': files, 'streams': frame['streams'],
             'frame_age_ms': frame['frame_age_ms'],
             'shapes': {name: list(image.shape) for name, (image, _) in images.items()}}

@@ -157,7 +157,7 @@ class ReaderTests(unittest.TestCase):
 
 
 class CaptureTests(unittest.TestCase):
-    def run_capture(self, camera, failed_write=False, once=True):
+    def run_capture(self, camera, failed_write=False, once=True, all_data=True):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         cfg = {'camera': {'color_width': 4, 'color_height': 3, 'fps': 30, 'depth_alpha': .4},
@@ -169,7 +169,7 @@ class CaptureTests(unittest.TestCase):
         with patch.dict(sys.modules, {'API': api, 'API.ScepterDS_enums': enums}), \
              patch.object(photo, 'load_config', return_value=cfg), \
              patch.object(photo, 'init_sdk'), patch.object(photo, 'open_camera', return_value=camera), \
-             patch.object(sys, 'argv', ['capture', '--warmup', '0'] + (['--once', '--no-preview'] if once else [])):
+             patch.object(sys, 'argv', ['capture', '--warmup', '0'] + (['--all-data'] if all_data else []) + (['--once', '--no-preview'] if once else [])):
             if failed_write:
                 with patch.object(snapshot.cv2, 'imwrite', return_value=False):
                     status = photo.main()
@@ -214,6 +214,28 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(result[0], 0)
         self.assertEqual(result[1]['shot_count'], 1)
         self.assertIn('pointcloud', result[1]['frames'][0]['files'])
+
+
+    def test_normal_capture_skips_point_conversion_and_ply(self):
+        camera = FakeCamera()
+        with patch.object(camera, 'scConvertDepthFrameToPointCloudVector',
+                          side_effect=AssertionError('point conversion must not run')) as convert:
+            status, metadata, directory = self.run_capture(camera, all_data=False)
+        self.assertEqual(status, 0)
+        self.assertEqual(metadata['capture_mode'], 'images')
+        self.assertNotIn('ply_format', metadata)
+        self.assertEqual(set(metadata['frames'][0]['files']), {'color', 'depth', 'depth_colormap', 'ir'})
+        self.assertFalse((directory / 'pointcloud').exists())
+        self.assertFalse(list(directory.rglob('*.ply')))
+        convert.assert_not_called()
+
+    def test_normal_capture_allows_images_when_ir_is_not_ready(self):
+        camera = FakeCamera()
+        camera.ready.ir = False
+        status, metadata, _, = self.run_capture(camera, all_data=False)
+        self.assertEqual(status, 0)
+        self.assertNotIn('ir', metadata['frames'][0]['files'])
+
 
 
 if __name__ == '__main__':

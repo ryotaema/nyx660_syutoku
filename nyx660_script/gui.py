@@ -103,11 +103,11 @@ class App:
 
         # --- 画像 ---
         t = self._tab(nb, '画像')
-        self._task(t, '全データを1枚取得', 'RGB・深度・IR・PLYを、露光安定待ちの後にまとめて保存します',
-                   '約2秒後に自動保存して終了', 'collect/dataset_collect_photo.py', 'images',
-                   args=lambda: ['--once'])
-        self._task(t, '全データを1枚ずつ撮る', 'RGB・深度・IR・PLYを [s] キーで一括保存します',
+        self._task(t, '1枚ずつ撮る', '画像を [s] キーで1枚ずつ保存します（PLYなし）',
                    '[s] 保存  [q] 終了', 'collect/dataset_collect_photo.py', 'images')
+        self._task(t, '全データを1枚ずつ撮る', 'RGB・深度・IR・PLYを [s] キーで一括保存します',
+                   '[s] 保存  [q] 終了', 'collect/dataset_collect_photo.py', 'images',
+                   args=lambda: ['--all-data'])
         self._task(t, '連続で撮る', '[Enter] で開始すると毎フレーム保存し続けます',
                    '[Enter] 開始  [q] 終了', 'collect/dataset_collect.py', 'images')
 
