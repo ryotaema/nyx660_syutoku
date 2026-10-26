@@ -385,15 +385,21 @@ def _print_applied_params(cam, params, color_w=None, color_h=None):
     # JSONの値ではなくconfig.yamlの要求値と比較する（他はJSON準拠のOK/!!判定）
     color_expected = f"{color_w}*{color_h}" if color_w and color_h else control.get('ColorResolution')
 
+    def _manual_time(sensor):
+        # Auto露光ではカメラが露光時間を決めるので, JSON の値とは比べない
+        if exposure.get(f'{sensor}_ExposureMode') == 'Auto':
+            return None
+        return exposure.get(f'{sensor}_ExposureTime')
+
     rows = [
         ("ToF解像度",              control.get('ToFResolution'),          f"{tw}*{th}"),
         ("Color解像度(config.yaml基準)", color_expected,                  f"{cw}*{ch}"),
         ("FPS",                    control.get('FrameRate'),              fps),
         ("WorkMode",               control.get('WorkMode'),               _workmode_name(work_mode)),
         ("ToF露光mode",            exposure.get('ToF_ExposureMode'),      _mode_name(tof_mode)),
-        ("ToF露光time(us)",        exposure.get('ToF_ExposureTime'),      tof_exp),
+        ("ToF露光time(us)",        _manual_time('ToF'),                   tof_exp),
         ("Color露光mode",          exposure.get('Color_ExposureMode'),    _mode_name(color_mode)),
-        ("Color露光time(us)",      exposure.get('Color_ExposureTime'),    color_exp),
+        ("Color露光time(us)",      _manual_time('Color'),                 color_exp),
         ("ColorAECROI",            exposure.get('ColorAECROI'),           [rx, ry, rw, rh]),
         ("HDR_Mode",               exposure.get('HDR_Mode'),              hdr),
         ("WDR_Mode",               exposure.get('WDR_Mode'),              wdr),
